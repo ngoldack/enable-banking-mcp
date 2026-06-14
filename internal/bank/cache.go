@@ -14,11 +14,16 @@ type AccountBalance struct {
 	Amount string `json:"amount"` // e.g., "120.45"
 }
 
+// Currency is an ISO 4217 currency code (e.g. "EUR").
+type Currency string
+
 type Account struct {
 	ID               string           `json:"id"`
 	Name             string           `json:"name"`
 	BankName         string           `json:"bank_name"`
-	Currency         string           `json:"currency"`
+	ConnectionName   string           `json:"connection_name"`
+	Country          string           `json:"country,omitempty"`
+	Currency         Currency         `json:"currency"`
 	IBAN             string           `json:"iban"`
 	Balances         []AccountBalance `json:"balances"`
 	AvailableBalance string           `json:"available_balance"`
@@ -26,14 +31,14 @@ type Account struct {
 }
 
 type Transaction struct {
-	ID               string `json:"id"`
-	Date             string `json:"date"`        // "2026-06-14"
-	Description      string `json:"description"` // "To: Amazon", "From: Oliver Virtanen"
-	Amount           string `json:"amount"`      // "-15.50", "+120.00"
-	Currency         string `json:"currency"`
-	IsIncoming       bool   `json:"is_incoming"`
-	Status           string `json:"status"` // "Completed", "Pending"
-	CounterpartyIban string `json:"counterparty_iban"`
+	ID               string   `json:"id"`
+	Date             string   `json:"date"`        // "2026-06-14"
+	Description      string   `json:"description"` // "To: Amazon", "From: Oliver Virtanen"
+	Amount           string   `json:"amount"`      // "-15.50", "+120.00"
+	Currency         Currency `json:"currency"`
+	IsIncoming       bool     `json:"is_incoming"`
+	Status           string   `json:"status"` // "Completed", "Pending"
+	CounterpartyIban string   `json:"counterparty_iban"`
 }
 
 type AccountDetail struct {

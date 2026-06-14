@@ -4,10 +4,11 @@ import (
 	"fmt"
 
 	"github.com/ngoldack/fin-mcp/internal/bank"
+	"github.com/ngoldack/fin-mcp/internal/config"
 	eb "github.com/ngoldack/fin-mcp/pkg/enablebanking"
 )
 
-func mapAccount(acc eb.AccountResource, bankName string) bank.Account {
+func mapAccount(acc eb.AccountResource, conn config.Connection) bank.Account {
 	iban := acc.AccountID.Iban
 	if iban == "" {
 		iban = acc.AccountID.BBan
@@ -17,11 +18,13 @@ func mapAccount(acc eb.AccountResource, bankName string) bank.Account {
 		name = "Standard Account"
 	}
 	return bank.Account{
-		ID:       acc.Uid,
-		Name:     name,
-		BankName: bankName,
-		Currency: acc.Currency,
-		IBAN:     iban,
+		ID:             acc.Uid,
+		Name:           name,
+		BankName:       conn.Bank,
+		ConnectionName: conn.Name,
+		Country:        string(conn.Country),
+		Currency:       bank.Currency(acc.Currency),
+		IBAN:           iban,
 	}
 }
 
@@ -129,7 +132,7 @@ func mapTransactions(txs []eb.Transaction) []bank.Transaction {
 			Date:             date,
 			Description:      desc,
 			Amount:           amount,
-			Currency:         tx.TransactionAmount.Currency,
+			Currency:         bank.Currency(tx.TransactionAmount.Currency),
 			IsIncoming:       isIncoming,
 			Status:           status,
 			CounterpartyIban: counterpartyIban,

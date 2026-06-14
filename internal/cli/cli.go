@@ -18,6 +18,7 @@ import (
 // CLI is the root command tree parsed by Kong.
 type CLI struct {
 	Setup  SetupCmd  `cmd:"" help:"Configure credentials and authorize a bank connection (interactive TUI or via flags)."`
+	Config ConfigCmd `cmd:"" help:"Manage the configuration file: providers and bank connections."`
 	Server ServerCmd `cmd:"" help:"Start the MCP server (stdio or SSE transport, configured via file and/or env)."`
 	TUI    TUICmd    `cmd:"" name:"tui" help:"Start the interactive Terminal UI banking dashboard."`
 }

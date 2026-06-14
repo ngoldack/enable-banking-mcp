@@ -19,12 +19,16 @@ const validAppID = "ad3c5dd5-1711-417e-a94f-82da6e897bc2" // 36 chars
 
 func TestLoad_FileAndDefaults(t *testing.T) {
 	p := writeFile(t, `{
-      "enable_banking": {
-        "app_id": "`+validAppID+`",
-        "redirect_url": "http://localhost:8080/callback",
-        "session_id": "sess-1",
-        "consent_valid_until": "2026-09-12T13:36:15Z"
-      },
+      "providers": [{
+        "name": "eb", "type": "enable-banking",
+        "enable_banking": {
+          "app_id": "`+validAppID+`",
+          "redirect_url": "http://localhost:8080/callback",
+          "connections": [
+            {"name":"c24","bank":"C24 Bank","country":"DE","session_id":"s1","consent_valid_until":"2026-09-12T13:36:15Z"}
+          ]
+        }
+      }],
       "mcp": { "access_mode": "ReadOnly" }
     }`)
 
@@ -32,35 +36,33 @@ func TestLoad_FileAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-
-	if cfg.EnableBanking.AppID != validAppID {
-		t.Errorf("app_id = %q", cfg.EnableBanking.AppID)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Type != ProviderEnableBanking {
+		t.Fatalf("providers = %+v", cfg.Providers)
 	}
-	if cfg.EnableBanking.ConsentValidUntil.Year() != 2026 {
-		t.Errorf("consent time not parsed: %v", cfg.EnableBanking.ConsentValidUntil)
+	eb := cfg.Providers[0].EnableBanking
+	if eb == nil || eb.AppID != validAppID {
+		t.Fatalf("enable_banking not parsed: %+v", eb)
 	}
-	// Defaults applied.
-	if cfg.EnableBanking.Environment != "SANDBOX" {
-		t.Errorf("env default = %q", cfg.EnableBanking.Environment)
+	if eb.Environment != EnvSandbox { // default applied
+		t.Errorf("environment default = %q", eb.Environment)
 	}
-	if cfg.MCP.Transport != TransportStdio {
-		t.Errorf("transport default = %q", cfg.MCP.Transport)
+	if len(eb.Connections) != 1 || eb.Connections[0].Country != "DE" {
+		t.Fatalf("connections = %+v", eb.Connections)
 	}
-	if cfg.MCP.CacheTTLMinutes != 5 {
-		t.Errorf("cache default = %d", cfg.MCP.CacheTTLMinutes)
+	if eb.Connections[0].ConsentValidUntil.Year() != 2026 {
+		t.Errorf("consent time not parsed: %v", eb.Connections[0].ConsentValidUntil)
 	}
-	if cfg.MCP.LogFormat != LogFormatText || cfg.MCP.LogLevel != "info" {
-		t.Errorf("log defaults = %q/%q", cfg.MCP.LogFormat, cfg.MCP.LogLevel)
+	if cfg.MCP.Transport != TransportStdio || cfg.MCP.CacheTTLMinutes != 5 || cfg.MCP.LogFormat != LogFormatText || cfg.MCP.LogLevel != LogInfo {
+		t.Errorf("mcp defaults = %+v", cfg.MCP)
 	}
 }
 
-func TestLoad_EnvOverridesFile(t *testing.T) {
+func TestLoad_EnvOverridesMCP(t *testing.T) {
 	p := writeFile(t, `{
-      "enable_banking": { "app_id": "`+validAppID+`", "environment": "SANDBOX" },
+      "providers": [{"name":"m","type":"mock"}],
       "mcp": { "access_mode": "ReadOnly", "transport": "stdio" }
     }`)
 
-	t.Setenv("ENABLE_BANKING_ENVIRONMENT", "PRODUCTION")
 	t.Setenv("MCP_ACCESS_MODE", "Unrestricted")
 	t.Setenv("MCP_TRANSPORT", "sse")
 	t.Setenv("MCP_PORT", "9000")
@@ -70,62 +72,39 @@ func TestLoad_EnvOverridesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.EnableBanking.Environment != "PRODUCTION" {
-		t.Errorf("env override failed: %q", cfg.EnableBanking.Environment)
-	}
-	if cfg.MCP.AccessMode != Unrestricted {
-		t.Errorf("access_mode override failed: %q", cfg.MCP.AccessMode)
-	}
-	if cfg.MCP.Transport != TransportSSE {
-		t.Errorf("transport override failed: %q", cfg.MCP.Transport)
-	}
-	if cfg.MCP.Port != 9000 { // string env coerced to int
-		t.Errorf("port override failed: %d", cfg.MCP.Port)
-	}
-	if cfg.MCP.CacheTTLMinutes != 15 {
-		t.Errorf("cache override failed: %d", cfg.MCP.CacheTTLMinutes)
+	if cfg.MCP.AccessMode != Unrestricted || cfg.MCP.Transport != TransportSSE || cfg.MCP.Port != 9000 || cfg.MCP.CacheTTLMinutes != 15 {
+		t.Errorf("env overrides failed: %+v", cfg.MCP)
 	}
 }
 
-func TestLoad_EnvOnlyNoFile(t *testing.T) {
-	t.Setenv("ENABLE_BANKING_APP_ID", validAppID)
-	t.Setenv("ENABLE_BANKING_REDIRECT_URL", "https://example.com/cb")
-	t.Setenv("MCP_TRANSPORT", "sse")
-	t.Setenv("MCP_PORT", "8090")
-
-	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "does-not-exist.json"))
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EnableBanking.AppID != validAppID {
-		t.Errorf("env-only app_id = %q", cfg.EnableBanking.AppID)
-	}
-	if cfg.MCP.Transport != TransportSSE || cfg.MCP.Port != 8090 {
-		t.Errorf("env-only mcp = %q/%d", cfg.MCP.Transport, cfg.MCP.Port)
-	}
+func baseConfig() *Config {
+	c := &Config{Providers: []ProviderConfig{{
+		Name: "eb", Type: ProviderEnableBanking,
+		EnableBanking: &EnableBankingConfig{AppID: validAppID},
+	}}}
+	c.applyDefaults()
+	return c
 }
 
 func TestValidate_Errors(t *testing.T) {
-	base := func() *Config {
-		c := &Config{}
-		c.EnableBanking.AppID = validAppID
-		c.applyDefaults()
-		return c
-	}
-
 	cases := map[string]func(*Config){
-		"bad app id":      func(c *Config) { c.EnableBanking.AppID = "short" },
-		"bad redirect":    func(c *Config) { c.EnableBanking.RedirectURL = "ftp://x" },
-		"bad access mode": func(c *Config) { c.MCP.AccessMode = "God" },
-		"bad transport":   func(c *Config) { c.MCP.Transport = "carrier-pigeon" },
-		"bad port":        func(c *Config) { c.MCP.Transport = TransportSSE; c.MCP.Port = 70000 },
-		"zero cache ttl":  func(c *Config) { c.MCP.CacheTTLMinutes = 0 },
-		"bad log level":   func(c *Config) { c.MCP.LogLevel = "loud" },
+		"dup provider":      func(c *Config) { c.Providers = append(c.Providers, c.Providers[0]) },
+		"unknown type":      func(c *Config) { c.Providers[0].Type = "wells-fargo" },
+		"missing eb block":  func(c *Config) { c.Providers[0].EnableBanking = nil },
+		"bad app id":        func(c *Config) { c.Providers[0].EnableBanking.AppID = "short" },
+		"bad redirect":      func(c *Config) { c.Providers[0].EnableBanking.RedirectURL = "ftp://x" },
+		"bad environment":   func(c *Config) { c.Providers[0].EnableBanking.Environment = "STAGING" },
+		"dup connection":    func(c *Config) { c.Providers[0].EnableBanking.Connections = []Connection{{Name: "a"}, {Name: "a"}} },
+		"empty provider id": func(c *Config) { c.Providers[0].Name = "" },
+		"bad access mode":   func(c *Config) { c.MCP.AccessMode = "God" },
+		"bad transport":     func(c *Config) { c.MCP.Transport = "pigeon" },
+		"bad port":          func(c *Config) { c.MCP.Transport = TransportSSE; c.MCP.Port = 70000 },
+		"zero cache ttl":    func(c *Config) { c.MCP.CacheTTLMinutes = 0 },
+		"bad log level":     func(c *Config) { c.MCP.LogLevel = "loud" },
 	}
-
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			c := base()
+			c := baseConfig()
 			mutate(c)
 			if err := c.Validate(); err == nil {
 				t.Errorf("expected validation error for %s", name)
@@ -134,12 +113,17 @@ func TestValidate_Errors(t *testing.T) {
 	}
 }
 
+func TestValidate_OK(t *testing.T) {
+	if err := baseConfig().Validate(); err != nil {
+		t.Errorf("baseConfig should validate: %v", err)
+	}
+}
+
 func TestSaveRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "out.json")
-	cfg := &Config{}
-	cfg.EnableBanking.AppID = validAppID
-	cfg.EnableBanking.RedirectURL = "http://localhost:8080/callback"
-	cfg.applyDefaults()
+	cfg := baseConfig()
+	cfg.Providers[0].EnableBanking.RedirectURL = "http://localhost:8080/callback"
+	cfg.Providers[0].EnableBanking.Connections = []Connection{{Name: "c24", Bank: "C24 Bank", Country: "DE", SessionID: "s1"}}
 
 	if err := SaveConfig(p, cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
@@ -148,31 +132,21 @@ func TestSaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if got.EnableBanking.AppID != cfg.EnableBanking.AppID || got.MCP.AccessMode != cfg.MCP.AccessMode {
-		t.Errorf("round trip mismatch: %+v", got)
+	if len(got.Providers) != 1 || got.Providers[0].EnableBanking.Connections[0].Name != "c24" {
+		t.Errorf("round trip mismatch: %+v", got.Providers)
 	}
 }
 
-func TestLoad_Providers(t *testing.T) {
+func TestLoad_MockProvider(t *testing.T) {
 	p := writeFile(t, `{
       "providers": [
-        {"name":"m1","type":"mock","mock":{"accounts":2}},
-        {"name":"bank2","type":"enable-banking","enable_banking":{"app_id":"`+validAppID+`","environment":"SANDBOX"}}
+        {"name":"m1","type":"mock","mock":{"accounts":2}}
       ],
       "mcp": {}
     }`)
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
-	}
-	if len(cfg.Providers) != 2 {
-		t.Fatalf("providers = %d, want 2", len(cfg.Providers))
-	}
-	if cfg.Providers[0].Type != "mock" || cfg.Providers[1].Type != "enable-banking" {
-		t.Errorf("provider types = %q,%q", cfg.Providers[0].Type, cfg.Providers[1].Type)
-	}
-	if cfg.Providers[1].EnableBanking == nil || cfg.Providers[1].EnableBanking.AppID != validAppID {
-		t.Errorf("enable-banking sub-config not parsed: %+v", cfg.Providers[1].EnableBanking)
 	}
 	if cfg.Providers[0].Mock == nil || cfg.Providers[0].Mock.Accounts != 2 {
 		t.Errorf("mock sub-config not parsed: %+v", cfg.Providers[0].Mock)

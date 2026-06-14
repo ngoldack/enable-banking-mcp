@@ -39,7 +39,7 @@ func New() *Provider {
 
 // NewNamed returns a seeded provider with a custom name.
 func NewNamed(name string) *Provider {
-	acc := bank.Account{ID: "acc-1", Name: "Main Checking", BankName: "Mock Bank", Currency: "EUR", IBAN: "DE89370400440532013000"}
+	acc := bank.Account{ID: "acc-1", Name: "Main Checking", BankName: "Mock Bank", ConnectionName: "mock-conn", Country: "DE", Currency: "EUR", IBAN: "DE89370400440532013000"}
 	return &Provider{
 		NameValue: name,
 		Status:    bank.ConnectionStatus{Authorized: true, Status: "AUTHORIZED", ConsentValidUntil: time.Now().Add(90 * 24 * time.Hour)},
@@ -66,12 +66,11 @@ func (p *Provider) Name() string {
 
 func (p *Provider) Info() bank.ProviderInfo {
 	return bank.ProviderInfo{
-		Name:              p.Name(),
-		Environment:       "MOCK",
-		BankName:          "Mock Bank",
-		BankCountry:       "DE",
-		SessionRef:        "mock-session",
-		ConsentValidUntil: p.Status.ConsentValidUntil,
+		Name:        p.Name(),
+		Environment: "MOCK",
+		Connections: []bank.ConnectionInfo{
+			{Name: "mock-conn", Bank: "Mock Bank", Country: "DE", ConsentValidUntil: p.Status.ConsentValidUntil},
+		},
 	}
 }
 

@@ -8,7 +8,7 @@ type TransferRequest struct {
 	CreditorIBAN string
 	CreditorName string
 	Amount       string
-	Currency     string
+	Currency     Currency
 	PaymentType  string // SEPA, INSTANT, DOMESTIC
 }
 
@@ -33,12 +33,18 @@ type ConnectionStatus struct {
 	ConsentValidUntil time.Time
 }
 
-// ProviderInfo is static, display-oriented metadata about a connected provider.
-type ProviderInfo struct {
+// ConnectionInfo is display metadata for one authorized bank link.
+type ConnectionInfo struct {
 	Name              string
-	Environment       string
-	BankName          string
-	BankCountry       string
-	SessionRef        string
+	Bank              string
+	Country           string
 	ConsentValidUntil time.Time
+}
+
+// ProviderInfo is static, display-oriented metadata about a connected provider
+// and its connections.
+type ProviderInfo struct {
+	Name        string
+	Environment string
+	Connections []ConnectionInfo
 }

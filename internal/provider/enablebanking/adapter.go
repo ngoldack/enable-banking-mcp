@@ -1,6 +1,7 @@
 // Package enablebanking adapts the Enable Banking SDK to the provider.Provider
-// port. It owns session handling and the mapping from raw SDK models to the
-// application's domain types.
+// port. One adapter wraps a single Enable Banking application (app credentials)
+// and may hold several connections — each connection is an authorized bank
+// session exposing one or more accounts (e.g. C24, Revolut).
 package enablebanking
 
 import (
@@ -22,8 +23,8 @@ type Adapter struct {
 	persist func() // saves the owning application config (e.g. refreshed consent)
 }
 
-// New builds the adapter and its underlying SDK client from a provider config.
-// If PrivateKeyKeyring is set, the PEM is read from the OS keychain (local only).
+// New builds the adapter and its SDK client from a provider config. If
+// PrivateKeyKeyring is set, the PEM is read from the OS keychain (local only).
 func New(name string, cfg *config.EnableBankingConfig, persist func()) (*Adapter, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("enable-banking provider %q: missing enable_banking config", name)
@@ -38,7 +39,7 @@ func New(name string, cfg *config.EnableBankingConfig, persist func()) (*Adapter
 		keyContent = v
 	}
 
-	client := eb.NewClient(cfg.AppID, cfg.PrivateKeyPath, keyContent, cfg.Environment)
+	client := eb.NewClient(cfg.AppID, cfg.PrivateKeyPath, keyContent, string(cfg.Environment))
 	return NewWithClient(name, client, cfg, persist), nil
 }
 
@@ -53,59 +54,103 @@ func NewWithClient(name string, client eb.APIClient, cfg *config.EnableBankingCo
 func (a *Adapter) Name() string { return a.name }
 
 func (a *Adapter) Info() bank.ProviderInfo {
+	conns := make([]bank.ConnectionInfo, 0, len(a.cfg.Connections))
+	for _, c := range a.cfg.Connections {
+		conns = append(conns, bank.ConnectionInfo{
+			Name:              c.Name,
+			Bank:              c.Bank,
+			Country:           string(c.Country),
+			ConsentValidUntil: c.ConsentValidUntil,
+		})
+	}
 	return bank.ProviderInfo{
-		Name:              a.name,
-		Environment:       a.cfg.Environment,
-		BankName:          a.cfg.BankName,
-		BankCountry:       a.cfg.BankCountry,
-		SessionRef:        a.cfg.SessionID,
-		ConsentValidUntil: a.cfg.ConsentValidUntil,
+		Name:        a.name,
+		Environment: string(a.cfg.Environment),
+		Connections: conns,
 	}
 }
 
+// VerifyConnection verifies every connection's session and refreshes consent
+// timestamps. It reports an aggregate status (authorized if at least one
+// connection is authorized).
 func (a *Adapter) VerifyConnection(ctx context.Context) (bank.ConnectionStatus, error) {
-	if a.cfg.SessionID == "" {
-		return bank.ConnectionStatus{}, fmt.Errorf("no active bank session found; run setup to link your bank account")
+	if len(a.cfg.Connections) == 0 {
+		return bank.ConnectionStatus{}, fmt.Errorf("no connections configured; run setup to link a bank")
 	}
 
-	sess, err := a.client.GetSession(ctx, a.cfg.SessionID)
-	if err != nil {
-		return bank.ConnectionStatus{}, fmt.Errorf("failed to verify bank session: %w; your session may have been invalidated", err)
+	authorized := 0
+	var earliest time.Time
+	var lastErr error
+	changed := false
+
+	for i := range a.cfg.Connections {
+		c := &a.cfg.Connections[i]
+		sess, err := a.client.GetSession(ctx, c.SessionID)
+		if err != nil {
+			lastErr = fmt.Errorf("connection %q: %w", c.Name, err)
+			continue
+		}
+		if !sess.Access.ValidUntil.IsZero() && !sess.Access.ValidUntil.Equal(c.ConsentValidUntil) {
+			c.ConsentValidUntil = sess.Access.ValidUntil
+			changed = true
+		}
+		if sess.Status == "AUTHORIZED" {
+			authorized++
+		} else {
+			lastErr = fmt.Errorf("connection %q: status %s (expected AUTHORIZED)", c.Name, sess.Status)
+		}
+		if earliest.IsZero() || (!c.ConsentValidUntil.IsZero() && c.ConsentValidUntil.Before(earliest)) {
+			earliest = c.ConsentValidUntil
+		}
 	}
 
-	status := bank.ConnectionStatus{
-		Authorized:        sess.Status == "AUTHORIZED",
-		Status:            sess.Status,
-		ConsentValidUntil: sess.Access.ValidUntil,
-	}
-
-	if !sess.Access.ValidUntil.IsZero() && !sess.Access.ValidUntil.Equal(a.cfg.ConsentValidUntil) {
-		a.cfg.ConsentValidUntil = sess.Access.ValidUntil
+	if changed {
 		a.persist()
 	}
 
-	if !status.Authorized {
-		return status, fmt.Errorf("bank session status is %s, expected AUTHORIZED; re-run setup to refresh", sess.Status)
+	status := bank.ConnectionStatus{
+		Authorized:        authorized > 0,
+		Status:            fmt.Sprintf("%d/%d connections authorized", authorized, len(a.cfg.Connections)),
+		ConsentValidUntil: earliest,
+	}
+	if authorized == 0 {
+		if lastErr != nil {
+			return status, lastErr
+		}
+		return status, fmt.Errorf("no connections are authorized; re-run setup")
 	}
 	return status, nil
 }
 
+// ListAccounts aggregates accounts across all connections; each account is
+// tagged with the connection it came from.
 func (a *Adapter) ListAccounts(ctx context.Context) ([]bank.Account, error) {
-	sess, err := a.client.GetSession(ctx, a.cfg.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve session details: %w", err)
+	if len(a.cfg.Connections) == 0 {
+		return nil, fmt.Errorf("no connections configured; run setup to link a bank")
 	}
 
 	var accounts []bank.Account
-	for _, accID := range sess.Accounts {
-		details, err := a.client.GetAccountDetails(ctx, accID)
+	var lastErr error
+	for _, c := range a.cfg.Connections {
+		sess, err := a.client.GetSession(ctx, c.SessionID)
 		if err != nil {
+			lastErr = fmt.Errorf("connection %q: %w", c.Name, err)
 			continue
 		}
-		accounts = append(accounts, mapAccount(*details, a.cfg.BankName))
+		for _, accID := range sess.Accounts {
+			details, err := a.client.GetAccountDetails(ctx, accID)
+			if err != nil {
+				continue
+			}
+			accounts = append(accounts, mapAccount(*details, c))
+		}
 	}
+
 	if len(accounts) == 0 {
-		return nil, fmt.Errorf("no accounts linked or accessible in this session")
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no accounts accessible across %d connection(s)", len(a.cfg.Connections))
 	}
 	return accounts, nil
 }
@@ -131,7 +176,7 @@ func (a *Adapter) InitiateTransfer(ctx context.Context, req bank.TransferRequest
 	state := fmt.Sprintf("pay-%d", time.Now().UnixNano())
 	resp, err := a.client.CreatePayment(
 		ctx, req.DebtorIBAN, req.CreditorIBAN, req.CreditorName,
-		req.Amount, req.Currency, req.PaymentType, state, a.cfg.RedirectURL,
+		req.Amount, string(req.Currency), req.PaymentType, state, a.cfg.RedirectURL,
 	)
 	if err != nil {
 		return nil, err

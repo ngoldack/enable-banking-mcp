@@ -110,10 +110,10 @@ func makeSuccessResult(msg string) (*mcp.CallToolResult, any, error) {
 
 func formatAccountsMarkdown(accounts []bank.Account) string {
 	s := "### 🏦 Bank Accounts Overview\n\n"
-	s += "| Account Name | Account ID (UID) | IBAN | Currency |\n"
-	s += "|---|---|---|---|\n"
+	s += "| Connection | Bank | Account Name | Account ID (UID) | IBAN | Currency |\n"
+	s += "|---|---|---|---|---|---|\n"
 	for _, a := range accounts {
-		s += fmt.Sprintf("| **%s** | `%s` | `%s` | %s |\n", a.Name, a.ID, a.IBAN, a.Currency)
+		s += fmt.Sprintf("| %s | %s | **%s** | `%s` | `%s` | %s |\n", a.ConnectionName, a.BankName, a.Name, a.ID, a.IBAN, a.Currency)
 	}
 	return s
 }
@@ -338,7 +338,7 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 		CreditorIBAN: args.CreditorIban,
 		CreditorName: args.CreditorName,
 		Amount:       args.Amount,
-		Currency:     args.Currency,
+		Currency:     bank.Currency(args.Currency),
 		PaymentType:  args.PaymentType,
 	})
 	if err != nil {
@@ -450,7 +450,7 @@ func RunMCPServer(configPath string) error {
 
 	// 1. Configure and initialize structured logging (log/slog) directed to os.Stderr
 	var level slog.Level
-	switch strings.ToLower(server.config.MCP.LogLevel) {
+	switch strings.ToLower(string(server.config.MCP.LogLevel)) {
 	case "debug":
 		level = slog.LevelDebug
 	case "warn":

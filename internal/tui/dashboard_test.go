@@ -16,19 +16,12 @@ import (
 func testModel(t *testing.T) *Model {
 	t.Helper()
 	cfg := &config.Config{
-		EnableBanking: config.EnableBankingConfig{
-			Environment:       "SANDBOX",
-			BankName:          "Mock ASPSP",
-			BankCountry:       "DE",
-			SessionID:         "session-abcdef123456",
-			ConsentValidUntil: time.Now().Add(72 * time.Hour),
-		},
 		MCP: config.MCPConfig{
 			AccessMode:      config.ReadOnly,
 			Transport:       config.TransportStdio,
 			CacheTTLMinutes: 5,
 			LogFormat:       config.LogFormatText,
-			LogLevel:        "info",
+			LogLevel:        config.LogInfo,
 		},
 	}
 	cache := bank.NewCache(t.TempDir()+"/cache.db", 5*time.Minute)

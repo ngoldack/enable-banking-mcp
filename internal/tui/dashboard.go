@@ -360,13 +360,13 @@ func (m *Model) setAccounts(accounts []bank.Account) {
 func (m *Model) rebuildDetailTables() {
 	balRows := make([]table.Row, len(m.balanceRaw))
 	for i, b := range m.balanceRaw {
-		balRows[i] = table.Row{b.Name, b.Amount + " " + m.selected.Currency}
+		balRows[i] = table.Row{b.Name, b.Amount + " " + string(m.selected.Currency)}
 	}
 	m.balances.SetRows(balRows)
 
 	txRows := make([]table.Row, len(m.txnRaw))
 	for i, tx := range m.txnRaw {
-		txRows[i] = table.Row{tx.Date, truncate(tx.Description, 30), tx.Amount + " " + tx.Currency, tx.Status}
+		txRows[i] = table.Row{tx.Date, truncate(tx.Description, 30), tx.Amount + " " + string(tx.Currency), tx.Status}
 	}
 	m.txns.SetRows(txRows)
 	m.txns.SetCursor(0)
@@ -397,23 +397,25 @@ func (m *Model) headerView() string {
 	if strings.EqualFold(info.Environment, "PRODUCTION") {
 		envStyle = errorStyle
 	}
-	consentText, consentStyle := consentStatus(info.ConsentValidUntil)
 
-	line1 := fmt.Sprintf("%s  %s   Bank: %s",
-		labelStyle.Render("Env"), envStyle.Render(info.Environment),
-		normalStyle.Render(fmt.Sprintf("%s (%s)", info.BankName, info.BankCountry)),
-	)
-	line2 := fmt.Sprintf("%s  %s   %s  %s",
-		labelStyle.Render("Session"), normalStyle.Render(shorten(info.SessionRef, 12)),
-		labelStyle.Render("Consent"), consentStyle.Render(consentText),
-	)
-	line3 := fmt.Sprintf("%s  %s · access=%s · cache=%dm",
+	lines := []string{
+		fmt.Sprintf("%s  %s   %s  %d",
+			labelStyle.Render("Env"), envStyle.Render(info.Environment),
+			labelStyle.Render("Connections"), len(info.Connections)),
+	}
+	for _, c := range info.Connections {
+		consentText, consentStyle := consentStatus(c.ConsentValidUntil)
+		lines = append(lines, fmt.Sprintf("  • %s · %s · %s",
+			normalStyle.Render(c.Name),
+			normalStyle.Render(fmt.Sprintf("%s (%s)", c.Bank, c.Country)),
+			consentStyle.Render(consentText)))
+	}
+	lines = append(lines, fmt.Sprintf("%s  %s · access=%s · cache=%dm",
 		labelStyle.Render("MCP"), normalStyle.Render(string(m.cfg.MCP.Transport)),
 		accessStyle(m.cfg.MCP.AccessMode).Render(string(m.cfg.MCP.AccessMode)),
-		m.cfg.MCP.CacheTTLMinutes,
-	)
-	status := statusBoxStyle.Width(min(m.width-2, 78)).Render(lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3))
+		m.cfg.MCP.CacheTTLMinutes))
 
+	status := statusBoxStyle.Width(min(m.width-2, 78)).Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 	return lipgloss.JoinVertical(lipgloss.Left, title, status)
 }
 

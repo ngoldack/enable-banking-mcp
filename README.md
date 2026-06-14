@@ -62,21 +62,30 @@ Configure the exact capabilities you grant to AI Agents by modifying the `mcp.ac
 
 ## 📂 Configuration Layout (`config.json`)
 
-The config file separates the Enable Banking API parameters from MCP server configurations:
+The config holds a list of typed **providers**. An Enable Banking provider carries
+the app credentials and one or more **connections** — each connection is one
+authorized bank link (an Enable Banking session) exposing one or more accounts
+(e.g. C24 with sub-accounts, Revolut with sub-accounts).
 
 ```json
 {
-  "enable_banking": {
-    "app_id": "your-36-char-uuid",
-    "private_key_path": "private.key",
-    "private_key_content": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...",
-    "environment": "SANDBOX",
-    "redirect_url": "http://localhost:8080/callback",
-    "bank_name": "Mock Bank DE",
-    "bank_country": "DE",
-    "session_id": "authenticated-session-uuid",
-    "consent_valid_until": "2026-09-14T15:00:00Z"
-  },
+  "providers": [
+    {
+      "name": "enable-banking",
+      "type": "enable-banking",
+      "enable_banking": {
+        "app_id": "your-36-char-uuid",
+        "private_key_path": "private.key",
+        "private_key_keyring": "",
+        "environment": "SANDBOX",
+        "redirect_url": "http://localhost:8080/callback",
+        "connections": [
+          { "name": "c24", "bank": "C24 Bank", "country": "DE", "session_id": "...", "consent_valid_until": "2026-09-14T15:00:00Z" },
+          { "name": "revolut", "bank": "Revolut", "country": "LT", "session_id": "...", "consent_valid_until": "2026-09-20T10:00:00Z" }
+        ]
+      }
+    }
+  ],
   "mcp": {
     "access_mode": "ReadOnly",
     "transport": "stdio",
@@ -86,18 +95,32 @@ The config file separates the Enable Banking API parameters from MCP server conf
 }
 ```
 
-### ⛵ Kubernetes Environment Variables
-You can override any setting inside your Kubernetes manifests (or local terminal) using these environment variables:
+Manage it with the CLI instead of editing by hand:
 
-- `ENABLE_BANKING_APP_ID` (e.g. `ENABLE_BANKING_APP_ID="ad3c5dd5-..."`)
-- `ENABLE_BANKING_PRIVATE_KEY_CONTENT` (allows putting the raw private key PEM inline in K8s Secrets!)
-- `ENABLE_BANKING_ENVIRONMENT` (`SANDBOX` or `PRODUCTION`)
-- `ENABLE_BANKING_REDIRECT_URL`
-- `ENABLE_BANKING_SESSION_ID`
+```bash
+fin-mcp config init                                   # bootstrap the file
+fin-mcp config provider add --name enable-banking --type enable-banking --app-id <UUID>
+fin-mcp config connection add --bank "C24 Bank" --country DE          # prints SCA URL
+fin-mcp config connection add --bank "C24 Bank" --country DE --code <CODE>
+fin-mcp config connection list
+fin-mcp config connection refresh                     # re-verify + refresh consent
+fin-mcp config validate
+fin-mcp config provider remove enable-banking
+```
+
+The private key can be stored in the OS keychain for local runs
+(`setup --keychain`, sets `private_key_keyring`); never used in Kubernetes — there,
+mount it as a Secret file (`private_key_path`) or inline (`private_key_content`).
+
+### ⛵ Kubernetes
+Mount the structured `providers` config as a ConfigMap/Secret file. The MCP server
+settings remain env-overridable:
+
 - `MCP_ACCESS_MODE` (`ReadOnly`, `InternalOnly`, `Unrestricted`)
 - `MCP_TRANSPORT` (`stdio` or `sse`)
 - `MCP_PORT` (e.g. `8090`)
-- `MCP_BEARER_TOKEN` (used to authorize incoming HTTP/SSE requests)
+- `MCP_BEARER_TOKEN` (authorizes incoming HTTP/SSE requests)
+- `MCP_CACHE_TTL_MINUTES`, `MCP_LOG_FORMAT`, `MCP_LOG_LEVEL`
 
 ---
 

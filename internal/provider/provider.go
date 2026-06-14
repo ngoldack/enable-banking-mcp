@@ -77,35 +77,26 @@ func (r *Registry) All() []Provider {
 	return out
 }
 
-// FromConfig builds the registry from configuration: the legacy top-level
-// enable_banking block (if populated) becomes the primary provider, and each
-// entry in providers[] is added as a typed, named instance.
+// FromConfig builds the registry from configuration. Each entry in providers[]
+// becomes a typed, named provider instance.
 func FromConfig(cfg *config.Config, configPath string) (*Registry, error) {
 	reg := NewRegistry()
 	persist := func() { _ = config.SaveConfig(configPath, cfg) }
-
-	if cfg.EnableBanking.AppID != "" || cfg.EnableBanking.SessionID != "" {
-		eb, err := ebadapter.New("enable-banking", &cfg.EnableBanking, persist)
-		if err != nil {
-			return nil, fmt.Errorf("init enable-banking provider: %w", err)
-		}
-		reg.Add(eb)
-	}
 
 	for i := range cfg.Providers {
 		pc := &cfg.Providers[i]
 		name := pc.Name
 		if name == "" {
-			name = pc.Type
+			name = string(pc.Type)
 		}
 		switch pc.Type {
-		case "enable-banking":
+		case config.ProviderEnableBanking:
 			eb, err := ebadapter.New(name, pc.EnableBanking, persist)
 			if err != nil {
 				return nil, fmt.Errorf("init provider %q: %w", name, err)
 			}
 			reg.Add(eb)
-		case "mock":
+		case config.ProviderMock:
 			reg.Add(mock.NewNamed(name))
 		default:
 			return nil, fmt.Errorf("unknown provider type %q for instance %q", pc.Type, name)
@@ -113,7 +104,7 @@ func FromConfig(cfg *config.Config, configPath string) (*Registry, error) {
 	}
 
 	if len(reg.All()) == 0 {
-		return nil, fmt.Errorf("no bank provider configured; run setup or set providers in config")
+		return nil, fmt.Errorf("no bank provider configured; run 'config init' / setup")
 	}
 	return reg, nil
 }

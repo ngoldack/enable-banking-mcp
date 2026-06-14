@@ -62,6 +62,9 @@ type SetupModel struct {
 	loading    bool
 	statusMsg  string
 	cfg        *config.Config
+	eb         *config.EnableBankingConfig
+	bankName   string
+	bankCtry   string
 	client     enablebanking.APIClient
 
 	// Step 0: Choice
@@ -257,8 +260,13 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case exchangeMsg:
 		m.loading = false
-		m.cfg.EnableBanking.SessionID = msg.SessionID
-		m.cfg.EnableBanking.ConsentValidUntil = msg.Access.ValidUntil
+		m.eb.Connections = append(m.eb.Connections, config.Connection{
+			Name:              connSlug(m.bankName),
+			Bank:              m.bankName,
+			Country:           config.CountryCode(m.bankCtry),
+			SessionID:         msg.SessionID,
+			ConsentValidUntil: msg.Access.ValidUntil,
+		})
 
 		// Save configuration
 		err := config.SaveConfig(m.configPath, m.cfg)
@@ -412,18 +420,23 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				absKeyPath, _ := filepath.Abs(keyPath)
+				m.eb = &config.EnableBankingConfig{
+					AppID:          appID,
+					PrivateKeyPath: absKeyPath,
+					Environment:    config.Environment(env),
+					RedirectURL:    redirectVal,
+				}
 				m.cfg = &config.Config{
-					EnableBanking: config.EnableBankingConfig{
-						AppID:          appID,
-						PrivateKeyPath: absKeyPath,
-						Environment:    env,
-						RedirectURL:    redirectVal,
-					},
+					Providers: []config.ProviderConfig{{
+						Name:          "enable-banking",
+						Type:          config.ProviderEnableBanking,
+						EnableBanking: m.eb,
+					}},
 					MCP: config.MCPConfig{
 						AccessMode: config.ReadOnly,
 					},
 				}
-				m.client = enablebanking.NewClient(m.cfg.EnableBanking.AppID, m.cfg.EnableBanking.PrivateKeyPath, m.cfg.EnableBanking.PrivateKeyContent, m.cfg.EnableBanking.Environment)
+				m.client = enablebanking.NewClient(m.eb.AppID, m.eb.PrivateKeyPath, m.eb.PrivateKeyContent, string(m.eb.Environment))
 
 				m.step = stepBankFetch
 				m.err = nil
@@ -478,13 +491,13 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(m.filteredBanks) > 0 {
 					selected := m.filteredBanks[m.selectedBankIdx]
-					m.cfg.EnableBanking.BankName = selected.Name
-					m.cfg.EnableBanking.BankCountry = selected.Country
+					m.bankName = selected.Name
+					m.bankCtry = selected.Country
 
 					m.loading = true
 					m.statusMsg = "Initiating bank authorization redirect link..."
 					m.err = nil
-					return m, startAuthorizationTUISetup(m.client, m.cfg.EnableBanking.BankName, m.cfg.EnableBanking.BankCountry, m.cfg.EnableBanking.RedirectURL)
+					return m, startAuthorizationTUISetup(m.client, m.bankName, m.bankCtry, m.eb.RedirectURL)
 				}
 				return m, nil
 			}
@@ -790,7 +803,7 @@ func (m *SetupModel) View() string {
 func (m *SetupModel) startLocalCallbackServer() {
 	m.serverChan = make(chan string, 1)
 
-	u, err := url.Parse(m.cfg.EnableBanking.RedirectURL)
+	u, err := url.Parse(m.eb.RedirectURL)
 	if err != nil {
 		return
 	}
@@ -866,4 +879,13 @@ func RunTUISetup(configPath string) error {
 	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
+}
+
+func connSlug(bank string) string {
+	s := strings.ToLower(strings.TrimSpace(bank))
+	s = strings.ReplaceAll(s, " ", "-")
+	if s == "" {
+		s = "connection"
+	}
+	return s
 }
