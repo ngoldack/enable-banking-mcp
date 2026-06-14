@@ -184,11 +184,6 @@ func TestClient_GetSession_Mocked(t *testing.T) {
 	}
 }
 
-// Minimal check helper
-type jwtChecker interface {
-	ContainsJWT(string) bool
-}
-
 type containsHelper struct{}
 
 func (containsHelper) ContainsJWT(s string) bool {

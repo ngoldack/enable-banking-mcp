@@ -35,11 +35,8 @@ WORKDIR /app
 # Copy our pure Go application
 COPY --from=builder /app/enable-banking-go .
 
-# Copy the default configuration
-COPY config.json .
-
 ENTRYPOINT ["./enable-banking-go"]
-CMD ["server", "--config", "config.json"]
+CMD ["server", "--config", "/etc/enable-banking/config.json"]
 
 # =========================================================================
 # Stage 4: Instrumented Runtime (OTel Auto-Instrumented Stage)
@@ -65,12 +62,9 @@ COPY --from=builder /app/enable-banking-go .
 # Copy the OTel Auto-Instrumentation agent
 COPY --from=otel-agent /instrumentation/otel-go-instrumentation .
 
-# Copy the default configuration
-COPY config.json .
-
 # Standard OpenTelemetry environment variables (can be overridden by K8s / compose)
 ENV OTEL_SERVICE_NAME=enable-banking-mcp
 ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 
 ENTRYPOINT ["./otel-go-instrumentation", "./enable-banking-go"]
-CMD ["server", "--config", "config.json"]
+CMD ["server", "--config", "/etc/enable-banking/config.json"]

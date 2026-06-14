@@ -51,7 +51,7 @@ jobs:
 
       - name: Run Tests with gotestsum
         run: |
-          gotestsum --junitfile junit-report.xml --format pkg-and-test-status -- -v ./...
+          gotestsum --junitfile junit-report.xml --format pkgname-and-test-status -- -v ./...
 
       - name: Upload JUnit Test Results
         uses: actions/upload-artifact@v4

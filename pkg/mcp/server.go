@@ -605,7 +605,7 @@ func RunMCPServer(configPath string) error {
 	// Group goroutine 1: Run Stdio server
 	g.Go(func() error {
 		if err := mcpServer.Run(gCtx, &mcp.StdioTransport{}); err != nil {
-			return fmt.Errorf("Stdio server run error: %w", err)
+			return fmt.Errorf("stdio server run error: %w", err)
 		}
 		return nil
 	})

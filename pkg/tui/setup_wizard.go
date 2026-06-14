@@ -338,11 +338,12 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyPathInput.Blur()
 				m.redirectURLInput.Blur()
 				m.focusedInputIdx = (m.focusedInputIdx + 1) % 4
-				if m.focusedInputIdx == 0 {
+				switch m.focusedInputIdx {
+				case 0:
 					m.appIDInput.Focus()
-				} else if m.focusedInputIdx == 1 {
+				case 1:
 					m.keyPathInput.Focus()
-				} else if m.focusedInputIdx == 2 {
+				case 2:
 					m.redirectURLInput.Focus()
 				}
 				return m, nil
@@ -352,11 +353,12 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyPathInput.Blur()
 				m.redirectURLInput.Blur()
 				m.focusedInputIdx = (m.focusedInputIdx - 1 + 4) % 4
-				if m.focusedInputIdx == 0 {
+				switch m.focusedInputIdx {
+				case 0:
 					m.appIDInput.Focus()
-				} else if m.focusedInputIdx == 1 {
+				case 1:
 					m.keyPathInput.Focus()
-				} else if m.focusedInputIdx == 2 {
+				case 2:
 					m.redirectURLInput.Focus()
 				}
 				return m, nil
@@ -373,9 +375,10 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.keyPathInput.Blur()
 					m.redirectURLInput.Blur()
 					m.focusedInputIdx++
-					if m.focusedInputIdx == 1 {
+					switch m.focusedInputIdx {
+					case 1:
 						m.keyPathInput.Focus()
-					} else if m.focusedInputIdx == 2 {
+					case 2:
 						m.redirectURLInput.Focus()
 					}
 					return m, nil
