@@ -7,7 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caarlos0/env/v11"
+	"github.com/go-viper/mapstructure/v2"
+	kjson "github.com/knadh/koanf/parsers/json"
+	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 )
 
 type AccessMode string
@@ -25,18 +29,6 @@ const (
 	TransportSSE   TransportType = "sse"
 )
 
-type EnableBankingConfig struct {
-	AppID             string    `json:"app_id" env:"ENABLE_BANKING_APP_ID"`
-	PrivateKeyPath    string    `json:"private_key_path,omitempty" env:"ENABLE_BANKING_PRIVATE_KEY_PATH"`
-	PrivateKeyContent string    `json:"private_key_content,omitempty" env:"ENABLE_BANKING_PRIVATE_KEY_CONTENT"`
-	Environment       string    `json:"environment" env:"ENABLE_BANKING_ENVIRONMENT"`
-	RedirectURL       string    `json:"redirect_url" env:"ENABLE_BANKING_REDIRECT_URL"`
-	BankName          string    `json:"bank_name" env:"ENABLE_BANKING_BANK_NAME"`
-	BankCountry       string    `json:"bank_country" env:"ENABLE_BANKING_BANK_COUNTRY"`
-	SessionID         string    `json:"session_id,omitempty" env:"ENABLE_BANKING_SESSION_ID"`
-	ConsentValidUntil time.Time `json:"consent_valid_until,omitempty" env:"ENABLE_BANKING_CONSENT_VALID_UNTIL"`
-}
-
 type LogFormat string
 
 const (
@@ -44,14 +36,26 @@ const (
 	LogFormatJSON LogFormat = "json"
 )
 
+type EnableBankingConfig struct {
+	AppID             string    `json:"app_id"`
+	PrivateKeyPath    string    `json:"private_key_path,omitempty"`
+	PrivateKeyContent string    `json:"private_key_content,omitempty"`
+	Environment       string    `json:"environment"`
+	RedirectURL       string    `json:"redirect_url"`
+	BankName          string    `json:"bank_name"`
+	BankCountry       string    `json:"bank_country"`
+	SessionID         string    `json:"session_id,omitempty"`
+	ConsentValidUntil time.Time `json:"consent_valid_until,omitempty"`
+}
+
 type MCPConfig struct {
-	AccessMode      AccessMode    `json:"access_mode" env:"MCP_ACCESS_MODE"`
-	Transport       TransportType `json:"transport" env:"MCP_TRANSPORT"`
-	Port            int           `json:"port,omitempty" env:"MCP_PORT"`
-	BearerToken     string        `json:"bearer_token,omitempty" env:"MCP_BEARER_TOKEN"`
-	CacheTTLMinutes int           `json:"cache_ttl_minutes,omitempty" env:"MCP_CACHE_TTL_MINUTES"`
-	LogFormat       LogFormat     `json:"log_format,omitempty" env:"MCP_LOG_FORMAT"` // "text" or "json"
-	LogLevel        string        `json:"log_level,omitempty" env:"MCP_LOG_LEVEL"`   // "debug", "info", "warn", "error"
+	AccessMode      AccessMode    `json:"access_mode"`
+	Transport       TransportType `json:"transport"`
+	Port            int           `json:"port,omitempty"`
+	BearerToken     string        `json:"bearer_token,omitempty"`
+	CacheTTLMinutes int           `json:"cache_ttl_minutes,omitempty"`
+	LogFormat       LogFormat     `json:"log_format,omitempty"`
+	LogLevel        string        `json:"log_level,omitempty"`
 }
 
 type Config struct {
@@ -59,59 +63,82 @@ type Config struct {
 	MCP           MCPConfig           `json:"mcp"`
 }
 
+// LoadConfig assembles configuration in layers using koanf: an optional JSON
+// file, then environment-variable overrides. Env names are unchanged and map to
+// nested keys (e.g. ENABLE_BANKING_APP_ID -> enable_banking.app_id,
+// MCP_ACCESS_MODE -> mcp.access_mode), which keeps Kubernetes ConfigMap/Secret
+// wiring trivial.
 func LoadConfig(path string) (*Config, error) {
-	var cfg Config
+	k := koanf.New(".")
 
-	// 1. Try loading from file if it exists
+	// 1. Optional config file.
 	if _, err := os.Stat(path); err == nil {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read config file: %w", err)
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		if err := k.Load(file.Provider(path), kjson.Parser()); err != nil {
+			return nil, fmt.Errorf("failed to load config file %q: %w", path, err)
 		}
 	}
 
-	// 2. Override / Load from Environment Variables (Kubernetes-friendly using caarlos0/env)
-	if err := env.Parse(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse environment variables: %w", err)
+	// 2. Environment overrides (Kubernetes-friendly).
+	if err := k.Load(env.Provider("ENABLE_BANKING_", ".", envKey("ENABLE_BANKING_", "enable_banking")), nil); err != nil {
+		return nil, fmt.Errorf("failed to load ENABLE_BANKING_* env: %w", err)
+	}
+	if err := k.Load(env.Provider("MCP_", ".", envKey("MCP_", "mcp")), nil); err != nil {
+		return nil, fmt.Errorf("failed to load MCP_* env: %w", err)
 	}
 
-	// 3. Apply defaults
-	if cfg.EnableBanking.Environment == "" {
-		cfg.EnableBanking.Environment = "SANDBOX"
-	}
-	if cfg.MCP.AccessMode == "" {
-		cfg.MCP.AccessMode = ReadOnly
-	}
-	if cfg.MCP.Transport == "" {
-		cfg.MCP.Transport = TransportStdio
-	}
-	if cfg.MCP.CacheTTLMinutes == 0 {
-		cfg.MCP.CacheTTLMinutes = 5
-	}
-	if cfg.MCP.LogFormat == "" {
-		cfg.MCP.LogFormat = LogFormatText
-	}
-	if cfg.MCP.LogLevel == "" {
-		cfg.MCP.LogLevel = "info"
+	// 3. Unmarshal via json tags, converting RFC3339 strings to time.Time and
+	//    coercing string env values to their target types.
+	var cfg Config
+	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{
+		Tag: "json",
+		DecoderConfig: &mapstructure.DecoderConfig{
+			Result:           &cfg,
+			WeaklyTypedInput: true,
+			DecodeHook:       mapstructure.StringToTimeHookFunc(time.RFC3339),
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// 4. Validate configuration
+	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
-
 	return &cfg, nil
 }
 
+// envKey maps an env var name to a nested koanf key, e.g.
+// ("ENABLE_BANKING_", "enable_banking")("ENABLE_BANKING_APP_ID") -> "enable_banking.app_id".
+func envKey(prefix, group string) func(string) string {
+	return func(s string) string {
+		return group + "." + strings.ToLower(strings.TrimPrefix(s, prefix))
+	}
+}
+
+func (c *Config) applyDefaults() {
+	if c.EnableBanking.Environment == "" {
+		c.EnableBanking.Environment = "SANDBOX"
+	}
+	if c.MCP.AccessMode == "" {
+		c.MCP.AccessMode = ReadOnly
+	}
+	if c.MCP.Transport == "" {
+		c.MCP.Transport = TransportStdio
+	}
+	if c.MCP.CacheTTLMinutes == 0 {
+		c.MCP.CacheTTLMinutes = 5
+	}
+	if c.MCP.LogFormat == "" {
+		c.MCP.LogFormat = LogFormatText
+	}
+	if c.MCP.LogLevel == "" {
+		c.MCP.LogLevel = "info"
+	}
+}
+
 func (c *Config) Validate() error {
-	// Only validate AppID if present (allows initial blank setup)
-	if c.EnableBanking.AppID != "" {
-		if len(c.EnableBanking.AppID) != 36 {
-			return fmt.Errorf("enable_banking.app_id must be a valid 36-character UUID")
-		}
+	if c.EnableBanking.AppID != "" && len(c.EnableBanking.AppID) != 36 {
+		return fmt.Errorf("enable_banking.app_id must be a valid 36-character UUID")
 	}
 
 	if c.EnableBanking.RedirectURL != "" {
@@ -123,19 +150,17 @@ func (c *Config) Validate() error {
 	switch c.MCP.AccessMode {
 	case ReadOnly, InternalOnly, Unrestricted:
 	default:
-		return fmt.Errorf("invalid mcp.access_mode: '%s'. Valid modes are ReadOnly, InternalOnly, Unrestricted", c.MCP.AccessMode)
+		return fmt.Errorf("invalid mcp.access_mode: %q. Valid modes are ReadOnly, InternalOnly, Unrestricted", c.MCP.AccessMode)
 	}
 
 	switch c.MCP.Transport {
 	case TransportStdio, TransportSSE:
 	default:
-		return fmt.Errorf("invalid mcp.transport: '%s'. Valid transports are stdio, sse", c.MCP.Transport)
+		return fmt.Errorf("invalid mcp.transport: %q. Valid transports are stdio, sse", c.MCP.Transport)
 	}
 
-	if c.MCP.Transport == TransportSSE {
-		if c.MCP.Port < 0 || c.MCP.Port > 65535 {
-			return fmt.Errorf("invalid mcp.port: %d. Port must be between 1 and 65535", c.MCP.Port)
-		}
+	if c.MCP.Transport == TransportSSE && (c.MCP.Port < 0 || c.MCP.Port > 65535) {
+		return fmt.Errorf("invalid mcp.port: %d. Port must be between 1 and 65535", c.MCP.Port)
 	}
 
 	if c.MCP.CacheTTLMinutes <= 0 {
@@ -145,13 +170,13 @@ func (c *Config) Validate() error {
 	switch c.MCP.LogFormat {
 	case LogFormatText, LogFormatJSON:
 	default:
-		return fmt.Errorf("invalid mcp.log_format: '%s'. Valid formats are text, json", c.MCP.LogFormat)
+		return fmt.Errorf("invalid mcp.log_format: %q. Valid formats are text, json", c.MCP.LogFormat)
 	}
 
 	switch strings.ToLower(c.MCP.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
-		return fmt.Errorf("invalid mcp.log_level: '%s'. Valid levels are debug, info, warn, error", c.MCP.LogLevel)
+		return fmt.Errorf("invalid mcp.log_level: %q. Valid levels are debug, info, warn, error", c.MCP.LogLevel)
 	}
 
 	return nil
@@ -161,7 +186,6 @@ func SaveConfig(path string, cfg *Config) error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("cannot save invalid config: %w", err)
 	}
-
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
