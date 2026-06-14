@@ -46,36 +46,36 @@ func NewMCPServer(configPath string) (*MCPServer, error) {
 // Struct parameters for MCP Tools
 
 type EmptyParams struct {
-	Refresh bool `json:"refresh,omitempty" jsonschema:",description=Optional. If true, bypasses cache and fetches fresh data from the bank"`
+	Refresh bool `json:"refresh,omitempty" jsonschema:"Optional. If true, bypasses cache and fetches fresh data from the bank"`
 }
 
 type GetBalancesParams struct {
-	AccountID string `json:"account_id" jsonschema:",description=The unique bank account ID (UUID)"`
-	Refresh   bool   `json:"refresh,omitempty" jsonschema:",description=Optional. If true, bypasses cache and fetches fresh data"`
+	AccountID string `json:"account_id" jsonschema:"The unique bank account ID (UUID)"`
+	Refresh   bool   `json:"refresh,omitempty" jsonschema:"Optional. If true, bypasses cache and fetches fresh data"`
 }
 
 type GetTransactionsParams struct {
-	AccountID string `json:"account_id" jsonschema:",description=The unique bank account ID (UUID)"`
-	DateFrom  string `json:"date_from,omitempty" jsonschema:",description=Optional. Filter transactions starting from this date (format: YYYY-MM-DD)"`
-	DateTo    string `json:"date_to,omitempty" jsonschema:",description=Optional. Filter transactions up to this date (format: YYYY-MM-DD)"`
-	Refresh   bool   `json:"refresh,omitempty" jsonschema:",description=Optional. If true, bypasses cache and fetches fresh data"`
+	AccountID string `json:"account_id" jsonschema:"The unique bank account ID (UUID)"`
+	DateFrom  string `json:"date_from,omitempty" jsonschema:"Optional. Filter transactions starting from this date (format: YYYY-MM-DD)"`
+	DateTo    string `json:"date_to,omitempty" jsonschema:"Optional. Filter transactions up to this date (format: YYYY-MM-DD)"`
+	Refresh   bool   `json:"refresh,omitempty" jsonschema:"Optional. If true, bypasses cache and fetches fresh data"`
 }
 
 type InitiateTransferParams struct {
-	DebtorIban   string `json:"debtor_iban,omitempty" jsonschema:",description=Optional. The source bank account IBAN."`
-	CreditorIban string `json:"creditor_iban" jsonschema:",description=The destination bank account IBAN"`
-	CreditorName string `json:"creditor_name" jsonschema:",description=The name of the destination account owner or beneficiary"`
-	Amount       string `json:"amount" jsonschema:",description=The transfer amount in EUR (e.g. '10.50')"`
-	Currency     string `json:"currency,omitempty" jsonschema:",description=Optional. Currency code (defaults to 'EUR')"`
-	PaymentType  string `json:"payment_type,omitempty" jsonschema:",description=Optional. Payment type (SEPA, INSTANT, DOMESTIC - defaults to 'SEPA')"`
+	DebtorIban   string `json:"debtor_iban,omitempty" jsonschema:"Optional. The source bank account IBAN."`
+	CreditorIban string `json:"creditor_iban" jsonschema:"The destination bank account IBAN"`
+	CreditorName string `json:"creditor_name" jsonschema:"The name of the destination account owner or beneficiary"`
+	Amount       string `json:"amount" jsonschema:"The transfer amount in EUR (e.g. '10.50')"`
+	Currency     string `json:"currency,omitempty" jsonschema:"Optional. Currency code (defaults to 'EUR')"`
+	PaymentType  string `json:"payment_type,omitempty" jsonschema:"Optional. Payment type (SEPA, INSTANT, DOMESTIC - defaults to 'SEPA')"`
 }
 
 type PaymentStatusParams struct {
-	PaymentID string `json:"payment_id" jsonschema:",description=The unique payment ID returned by initiate-transfer"`
+	PaymentID string `json:"payment_id" jsonschema:"The unique payment ID returned by initiate-transfer"`
 }
 
 type SubmitTransferParams struct {
-	PaymentID string `json:"payment_id" jsonschema:",description=The unique payment ID returned by initiate-transfer"`
+	PaymentID string `json:"payment_id" jsonschema:"The unique payment ID returned by initiate-transfer"`
 }
 
 // Helpers for responses
