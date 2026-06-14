@@ -60,7 +60,7 @@ WORKDIR /app
 COPY --from=builder /app/enable-banking-go .
 
 # Copy the OTel Auto-Instrumentation agent
-COPY --from=otel-agent /instrumentation/otel-go-instrumentation .
+COPY --from=otel-agent /otel-go-instrumentation .
 
 # Standard OpenTelemetry environment variables (can be overridden by K8s / compose)
 ENV OTEL_SERVICE_NAME=enable-banking-mcp
