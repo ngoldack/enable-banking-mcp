@@ -66,5 +66,10 @@ COPY --from=otel-agent /instrumentation/otel-go-instrumentation .
 ENV OTEL_SERVICE_NAME=enable-banking-mcp
 ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 
+# CRITICAL AUTO-INSTRUMENTATION SPECIFICATION:
+# The OTel Go Auto-Instrumentation agent requires the exact path of the target
+# executable to dynamically hook and trace functions.
+ENV OTEL_GO_AUTO_TARGET_EXE=/app/enable-banking-go
+
 ENTRYPOINT ["./otel-go-instrumentation", "./enable-banking-go"]
 CMD ["server", "--config", "/etc/enable-banking/config.json"]
