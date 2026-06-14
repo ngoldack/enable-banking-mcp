@@ -1,0 +1,38 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Lists available tasks
+    cmds:
+      - task --list
+
+  tidy:
+    desc: Tidies up Go dependencies
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: Builds the enable-banking-go executable
+    cmds:
+      - go build -o enable-banking-go ./cmd/enable-banking-go
+
+  setup:
+    desc: Runs the interactive TUI setup wizard
+    cmds:
+      - go run ./cmd/enable-banking-go setup
+
+  server:
+    desc: Runs the Enable Banking MCP server (requires config.json)
+    cmds:
+      - go run ./cmd/enable-banking-go server --config config.json
+
+  tui:
+    desc: Runs the beautiful Bubble Tea TUI Pocket Dashboard (requires config.json)
+    cmds:
+      - go run ./cmd/enable-banking-go tui --config config.json
+
+  clean:
+    desc: Deletes compiled binaries and temporary certificates
+    cmds:
+      - rm -f enable-banking-go
+      - echo "Clean completed"

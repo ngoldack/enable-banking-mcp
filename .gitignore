@@ -1,0 +1,28 @@
+# Binaries and build artifacts
+/enable-banking-go
+/enable-banking-mcp
+enable-banking-go.exe
+enable-banking-mcp.exe
+dist/
+bin/
+
+# Private keys, certificates and PEM files (Crucial for Open Banking security!)
+private.key
+public.crt
+*.pem
+*.key
+*.crt
+
+# Local configurations, session credentials and caches
+config.json
+
+# Go test binaries and coverage files
+*.out
+*.test
+*.prof
+
+# OS and IDE specific files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
