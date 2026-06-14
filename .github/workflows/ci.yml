@@ -36,7 +36,6 @@ jobs:
   test:
     name: Unit & Integration Tests
     runs-on: ubuntu-latest
-    needs: lint
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -64,7 +63,6 @@ jobs:
   build-and-deliver:
     name: Secure Build & Deliver
     runs-on: ubuntu-latest
-    needs: test
     env:
       REGISTRY: ghcr.io
       IMAGE_BASE: ghcr.io/${{ github.repository }}

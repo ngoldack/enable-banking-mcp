@@ -37,12 +37,21 @@ type EnableBankingConfig struct {
 	ConsentValidUntil time.Time `json:"consent_valid_until,omitempty" env:"ENABLE_BANKING_CONSENT_VALID_UNTIL"`
 }
 
+type LogFormat string
+
+const (
+	LogFormatText LogFormat = "text"
+	LogFormatJSON LogFormat = "json"
+)
+
 type MCPConfig struct {
 	AccessMode      AccessMode    `json:"access_mode" env:"MCP_ACCESS_MODE"`
 	Transport       TransportType `json:"transport" env:"MCP_TRANSPORT"`
 	Port            int           `json:"port,omitempty" env:"MCP_PORT"`
 	BearerToken     string        `json:"bearer_token,omitempty" env:"MCP_BEARER_TOKEN"`
 	CacheTTLMinutes int           `json:"cache_ttl_minutes,omitempty" env:"MCP_CACHE_TTL_MINUTES"`
+	LogFormat       LogFormat     `json:"log_format,omitempty" env:"MCP_LOG_FORMAT"` // "text" or "json"
+	LogLevel        string        `json:"log_level,omitempty" env:"MCP_LOG_LEVEL"`   // "debug", "info", "warn", "error"
 }
 
 type Config struct {
@@ -81,6 +90,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MCP.CacheTTLMinutes == 0 {
 		cfg.MCP.CacheTTLMinutes = 5
+	}
+	if cfg.MCP.LogFormat == "" {
+		cfg.MCP.LogFormat = LogFormatText
+	}
+	if cfg.MCP.LogLevel == "" {
+		cfg.MCP.LogLevel = "info"
 	}
 
 	// 4. Validate configuration
@@ -125,6 +140,18 @@ func (c *Config) Validate() error {
 
 	if c.MCP.CacheTTLMinutes <= 0 {
 		return fmt.Errorf("mcp.cache_ttl_minutes must be a positive integer greater than 0")
+	}
+
+	switch c.MCP.LogFormat {
+	case LogFormatText, LogFormatJSON:
+	default:
+		return fmt.Errorf("invalid mcp.log_format: '%s'. Valid formats are text, json", c.MCP.LogFormat)
+	}
+
+	switch strings.ToLower(c.MCP.LogLevel) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("invalid mcp.log_level: '%s'. Valid levels are debug, info, warn, error", c.MCP.LogLevel)
 	}
 
 	return nil

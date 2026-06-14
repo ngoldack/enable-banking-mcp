@@ -3,16 +3,19 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ngoldack/enable-banking-go/pkg/bank"
 	"github.com/ngoldack/enable-banking-go/pkg/config"
 	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/errgroup"
 )
 
 type MCPServer struct {
@@ -127,6 +130,8 @@ func formatTransactionsMarkdown(txs []bank.Transaction) string {
 }
 
 func (s *MCPServer) checkSessionValid(ctx context.Context) error {
+	slog.DebugContext(ctx, "checking bank session validity", "session_id", s.config.EnableBanking.SessionID)
+
 	if s.config.EnableBanking.SessionID == "" {
 		return fmt.Errorf("no active bank session found. Please run the TUI or setup to link your bank account first")
 	}
@@ -145,6 +150,7 @@ func (s *MCPServer) checkSessionValid(ctx context.Context) error {
 	}
 
 	if !sess.Access.ValidUntil.IsZero() && !sess.Access.ValidUntil.Equal(s.config.EnableBanking.ConsentValidUntil) {
+		slog.InfoContext(ctx, "updating bank session consent expiration date", "new_date", sess.Access.ValidUntil)
 		s.config.EnableBanking.ConsentValidUntil = sess.Access.ValidUntil
 		_ = config.SaveConfig(s.configPath, s.config)
 	}
@@ -155,10 +161,12 @@ func (s *MCPServer) checkSessionValid(ctx context.Context) error {
 func (s *MCPServer) getAccountsList(ctx context.Context, refresh bool) ([]bank.Account, error) {
 	if !refresh {
 		if accounts, ok := s.cache.GetAccounts(ctx); ok {
+			slog.DebugContext(ctx, "cache hit for bank accounts list", "count", len(accounts))
 			return accounts, nil
 		}
 	}
 
+	slog.DebugContext(ctx, "cache miss for bank accounts list, fetching fresh details from API")
 	sess, err := s.client.GetSession(ctx, s.config.EnableBanking.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve session details: %w", err)
@@ -168,6 +176,7 @@ func (s *MCPServer) getAccountsList(ctx context.Context, refresh bool) ([]bank.A
 	for _, accID := range sess.Accounts {
 		accDetails, err := s.client.GetAccountDetails(ctx, accID)
 		if err != nil {
+			slog.WarnContext(ctx, "failed to fetch details for bank account", "account_id", accID, "error", err)
 			continue
 		}
 		accounts = append(accounts, bank.MapAccountToDomain(*accDetails, s.config.EnableBanking.BankName))
@@ -177,17 +186,22 @@ func (s *MCPServer) getAccountsList(ctx context.Context, refresh bool) ([]bank.A
 		return nil, fmt.Errorf("no accounts linked or accessible in this session")
 	}
 
+	slog.DebugContext(ctx, "saving retrieved accounts list to database cache", "count", len(accounts))
 	s.cache.SetAccounts(ctx, accounts)
 	return accounts, nil
 }
 
 func (s *MCPServer) handleListAccounts(ctx context.Context, req *mcp.CallToolRequest, args EmptyParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: list-accounts", "refresh", args.Refresh)
+
 	if err := s.checkSessionValid(ctx); err != nil {
+		slog.ErrorContext(ctx, "session verification failed", "error", err)
 		return makeErrorResult(err.Error())
 	}
 
 	accounts, err := s.getAccountsList(ctx, args.Refresh)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to retrieve bank accounts list", "error", err)
 		return makeErrorResult(err.Error())
 	}
 
@@ -201,7 +215,10 @@ func (s *MCPServer) handleListAccounts(ctx context.Context, req *mcp.CallToolReq
 }
 
 func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequest, args GetBalancesParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: get-balances", "account_id", args.AccountID, "refresh", args.Refresh)
+
 	if err := s.checkSessionValid(ctx); err != nil {
+		slog.ErrorContext(ctx, "session verification failed", "error", err)
 		return makeErrorResult(err.Error())
 	}
 
@@ -212,6 +229,7 @@ func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequ
 	// Try loading from cache first
 	if !args.Refresh {
 		if detail, ok := s.cache.GetDetail(ctx, args.AccountID); ok && len(detail.Balances) > 0 {
+			slog.DebugContext(ctx, "cache hit for account balances", "account_id", args.AccountID)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
 					&mcp.TextContent{Text: formatBalancesMarkdown(detail.Balances)},
@@ -221,8 +239,10 @@ func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequ
 		}
 	}
 
+	slog.DebugContext(ctx, "cache miss for account balances, fetching fresh from API", "account_id", args.AccountID)
 	balances, err := s.client.GetBalances(ctx, args.AccountID)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to fetch balances from API", "account_id", args.AccountID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch balances: %v", err))
 	}
 
@@ -235,6 +255,7 @@ func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequ
 	detail.Account.AvailableBalance = available
 	detail.Account.BookedBalance = booked
 
+	slog.DebugContext(ctx, "updating cache with retrieved balances", "account_id", args.AccountID)
 	s.cache.SetDetail(ctx, args.AccountID, detail)
 
 	md := formatBalancesMarkdown(domainBals)
@@ -247,7 +268,10 @@ func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequ
 }
 
 func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToolRequest, args GetTransactionsParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: list-transactions", "account_id", args.AccountID, "date_from", args.DateFrom, "date_to", args.DateTo, "refresh", args.Refresh)
+
 	if err := s.checkSessionValid(ctx); err != nil {
+		slog.ErrorContext(ctx, "session verification failed", "error", err)
 		return makeErrorResult(err.Error())
 	}
 
@@ -266,6 +290,7 @@ func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToo
 	// Try loading from cache first (if no dynamic date filter is applied)
 	if !args.Refresh && args.DateFrom == "" && args.DateTo == "" {
 		if detail, ok := s.cache.GetDetail(ctx, args.AccountID); ok && len(detail.Transactions) > 0 {
+			slog.DebugContext(ctx, "cache hit for transactions list", "account_id", args.AccountID, "count", len(detail.Transactions))
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
 					&mcp.TextContent{Text: formatTransactionsMarkdown(detail.Transactions)},
@@ -275,8 +300,10 @@ func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToo
 		}
 	}
 
+	slog.DebugContext(ctx, "cache miss for transactions list, fetching fresh from API", "account_id", args.AccountID)
 	txs, err := s.client.GetTransactions(ctx, args.AccountID, args.DateFrom, args.DateTo)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to fetch transactions from API", "account_id", args.AccountID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch transactions: %v", err))
 	}
 
@@ -287,6 +314,7 @@ func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToo
 		detail, _ := s.cache.GetDetail(ctx, args.AccountID)
 		detail.Account.ID = args.AccountID
 		detail.Transactions = domainTxs
+		slog.DebugContext(ctx, "updating cache with retrieved transactions list", "account_id", args.AccountID, "count", len(domainTxs))
 		s.cache.SetDetail(ctx, args.AccountID, detail)
 	}
 
@@ -300,15 +328,20 @@ func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToo
 }
 
 func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToolRequest, args InitiateTransferParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: initiate-transfer", "amount", args.Amount, "creditor_name", args.CreditorName)
+
 	// 1. Access Control Verification
 	if s.config.MCP.AccessMode == config.ReadOnly {
+		slog.WarnContext(ctx, "payment transfer rejected: server is running in ReadOnly mode")
 		return makeErrorResult("Access Denied: The MCP server is running in 'ReadOnly' mode. All payment transfers are strictly disabled.")
 	}
 
 	if s.config.MCP.AccessMode == config.InternalOnly {
+		slog.DebugContext(ctx, "verifying ownership of destination account for InternalOnly mode")
 		// Fetch the user's accounts to verify if CreditorIban matches any owned account
 		accounts, err := s.getAccountsList(ctx, false)
 		if err != nil {
+			slog.ErrorContext(ctx, "failed to fetch owned accounts list for security verification", "error", err)
 			return makeErrorResult(fmt.Sprintf("Access Denied: 'InternalOnly' mode verification failed to fetch owned accounts: %v", err))
 		}
 
@@ -323,10 +356,12 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 		}
 
 		if !matched {
+			slog.WarnContext(ctx, "payment transfer rejected: destination account is not owned by the user", "creditor_iban", args.CreditorIban)
 			return makeErrorResult("Access Denied: The MCP server is running in 'InternalOnly' mode. Transfers are strictly restricted to your own linked bank accounts.")
 		}
 	}
 
+	slog.InfoContext(ctx, "creating payment on bank API", "creditor_iban", args.CreditorIban, "amount", args.Amount)
 	state := fmt.Sprintf("pay-%d", time.Now().UnixNano())
 
 	paymentResp, err := s.client.CreatePayment(
@@ -341,8 +376,11 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 		s.config.EnableBanking.RedirectURL,
 	)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to create payment on bank API", "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to initiate transfer: %v", err))
 	}
+
+	slog.InfoContext(ctx, "payment successfully created", "payment_id", paymentResp.PaymentID, "status", paymentResp.Status)
 
 	responseMsg := fmt.Sprintf("Transfer successfully initiated!\n\n"+
 		"- Payment ID: %s\n"+
@@ -364,14 +402,19 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 }
 
 func (s *MCPServer) handleGetPaymentStatus(ctx context.Context, req *mcp.CallToolRequest, args PaymentStatusParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: get-payment-status", "payment_id", args.PaymentID)
+
 	if args.PaymentID == "" {
 		return makeErrorResult("payment_id is required")
 	}
 
 	payment, err := s.client.GetPayment(ctx, args.PaymentID)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to retrieve payment status", "payment_id", args.PaymentID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch payment: %v", err))
 	}
+
+	slog.InfoContext(ctx, "payment status retrieved", "payment_id", args.PaymentID, "status", payment.Status)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
@@ -382,14 +425,19 @@ func (s *MCPServer) handleGetPaymentStatus(ctx context.Context, req *mcp.CallToo
 }
 
 func (s *MCPServer) handleSubmitTransfer(ctx context.Context, req *mcp.CallToolRequest, args SubmitTransferParams) (*mcp.CallToolResult, any, error) {
+	slog.InfoContext(ctx, "received tool call: submit-transfer", "payment_id", args.PaymentID)
+
 	if args.PaymentID == "" {
 		return makeErrorResult("payment_id is required")
 	}
 
 	resp, err := s.client.SubmitPayment(ctx, args.PaymentID)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to submit payment for execution", "payment_id", args.PaymentID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to submit payment for execution: %v", err))
 	}
+
+	slog.InfoContext(ctx, "payment submitted successfully", "payment_id", args.PaymentID, "status", resp.Status)
 
 	msg := "Payment successfully submitted for execution!"
 	if resp.Message != "" {
@@ -426,17 +474,38 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 			return
 		}
 
+		slog.Warn("unauthorized request blocked inside HTTP middleware")
 		http.Error(w, "Unauthorized: Invalid or missing bearer token", http.StatusUnauthorized)
 	})
 }
 
 func RunMCPServer(configPath string) error {
-	log.SetOutput(os.Stderr)
-
 	server, err := NewMCPServer(configPath)
 	if err != nil {
 		return err
 	}
+
+	// 1. Configure and initialize structured logging (log/slog) directed to os.Stderr
+	var level slog.Level
+	switch strings.ToLower(server.config.MCP.LogLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	var handler slog.Handler
+	if server.config.MCP.LogFormat == config.LogFormatJSON {
+		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	}
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "enable-banking-mcp",
@@ -475,6 +544,12 @@ func RunMCPServer(configPath string) error {
 		Description: "Submit an authorized payment for execution.",
 	}, server.handleSubmitTransfer)
 
+	// 2. Setup Signal-aware Graceful context
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	g, gCtx := errgroup.WithContext(ctx)
+
 	// Determine Transport Type
 	if server.config.MCP.Transport == config.TransportSSE {
 		port := server.config.MCP.Port
@@ -491,19 +566,61 @@ func RunMCPServer(configPath string) error {
 		mux.Handle("/", secureHandler)
 
 		addr := fmt.Sprintf(":%d", port)
-		log.Printf("Starting Enable Banking MCP Server over HTTPS/SSE on %s...", addr)
 		
 		httpServer := &http.Server{
 			Addr:    addr,
 			Handler: mux,
 		}
-		return httpServer.ListenAndServe()
+
+		// Group goroutine 1: Run HTTP server
+		g.Go(func() error {
+			slog.InfoContext(gCtx, "starting Enable Banking MCP Server over HTTPS/SSE", "addr", addr)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("HTTP server ListenAndServe error: %w", err)
+			}
+			return nil
+		})
+
+		// Group goroutine 2: Monitor context cancellation for graceful shutdown
+		g.Go(func() error {
+			<-gCtx.Done()
+			slog.Info("shutting down HTTP server gracefully...")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return httpServer.Shutdown(shutdownCtx)
+		})
+
+		// Wait for goroutines to complete
+		if err := g.Wait(); err != nil {
+			return fmt.Errorf("MCP server runtime error: %w", err)
+		}
+		
+		slog.Info("MCP server successfully stopped.")
+		return nil
 	}
 
-	log.Printf("Starting Enable Banking MCP Server over Stdio...")
-	if err := mcpServer.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		return fmt.Errorf("MCP Server runtime error: %w", err)
+	// Stdio Transport
+	slog.InfoContext(gCtx, "starting Enable Banking MCP Server over Stdio")
+
+	// Group goroutine 1: Run Stdio server
+	g.Go(func() error {
+		if err := mcpServer.Run(gCtx, &mcp.StdioTransport{}); err != nil {
+			return fmt.Errorf("Stdio server run error: %w", err)
+		}
+		return nil
+	})
+
+	// Group goroutine 2: Monitor signal cancellation for Stdio
+	g.Go(func() error {
+		<-gCtx.Done()
+		slog.Info("shutting down Stdio server gracefully...")
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("MCP server runtime error: %w", err)
 	}
 
+	slog.Info("MCP server successfully stopped.")
 	return nil
 }
