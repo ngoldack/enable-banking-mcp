@@ -34,7 +34,7 @@ func GenerateRSAKeyAndCertificate(keyPath, certPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open %s for writing: %w", keyPath, err)
 	}
-	defer keyOut.Close()
+	defer func() { _ = keyOut.Close() }()
 
 	privBlock := &pem.Block{
 		Type:  "RSA PRIVATE KEY",
@@ -77,7 +77,7 @@ func GenerateRSAKeyAndCertificate(keyPath, certPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open %s for writing: %w", certPath, err)
 	}
-	defer certOut.Close()
+	defer func() { _ = certOut.Close() }()
 
 	certBlock := &pem.Block{
 		Type:  "CERTIFICATE",
@@ -151,7 +151,7 @@ func RunInteractiveSetup(configPath string) error {
 	appID, _ := reader.ReadString('\n')
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
-		return errors.New("Application ID cannot be empty")
+		return errors.New("application ID cannot be empty")
 	}
 
 	redirectURL := "http://localhost:8080/callback"

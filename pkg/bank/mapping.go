@@ -57,9 +57,10 @@ func MapBalancesToDomain(balances []enablebanking.BalanceResource) ([]AccountBal
 		})
 
 		// Track primary available and booked balances
-		if bal.BalanceType == "CLAV" || bal.BalanceType == "ITAV" {
+		switch bal.BalanceType {
+		case "CLAV", "ITAV":
 			available = bal.BalanceAmount.Amount
-		} else if bal.BalanceType == "CLBD" || bal.BalanceType == "ITBD" {
+		case "CLBD", "ITBD":
 			booked = bal.BalanceAmount.Amount
 		}
 	}

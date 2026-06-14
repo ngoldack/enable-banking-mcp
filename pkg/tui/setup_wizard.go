@@ -161,7 +161,7 @@ func fetchBanksForTUISetup(client enablebanking.APIClient, country string) tea.C
 
 		var filtered []enablebanking.ASPSP
 		for _, aspsp := range all {
-			if strings.ToUpper(aspsp.Country) == strings.ToUpper(country) {
+			if strings.EqualFold(aspsp.Country, country) {
 				filtered = append(filtered, aspsp)
 			}
 		}
@@ -813,7 +813,7 @@ func (m *SetupModel) startLocalCallbackServer() {
 
 		if errParam != "" {
 			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprintf(w, `
+			_, _ = fmt.Fprintf(w, `
 				<html>
 				<body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background-color: #1e1e2e; color: #f38ba8;">
 					<h2>❌ Bank Authorization Failed</h2>
@@ -828,7 +828,7 @@ func (m *SetupModel) startLocalCallbackServer() {
 
 		if code != "" {
 			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprintf(w, `
+			_, _ = fmt.Fprintf(w, `
 				<html>
 				<body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background-color: #1e1e2e; color: #a6e3a1;">
 					<h2>✅ Authorization Successful!</h2>
@@ -840,7 +840,7 @@ func (m *SetupModel) startLocalCallbackServer() {
 			m.serverChan <- code
 		} else {
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, "Missing 'code' query parameter.")
+			_, _ = fmt.Fprint(w, "Missing 'code' query parameter.")
 		}
 	})
 

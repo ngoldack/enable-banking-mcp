@@ -268,12 +268,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "esc":
-			if m.state == stateAccountDetail || m.state == stateTransfer {
+			switch m.state {
+			case stateAccountDetail, stateTransfer:
 				m.state = stateAccounts
 				m.err = nil
 				m.showAbbreviationsHelp = false
 				return m, nil
-			} else if m.state == stateTransferResult {
+			case stateTransferResult:
 				m.state = stateAccounts
 				return m, nil
 			}
