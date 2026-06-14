@@ -31,19 +31,19 @@ A high-performance, modular, and enterprise-ready Go workspace implementing an O
 ### 2. Interactive Setup
 Run the setup wizard to generate private keys, register certificates, select your bank, and complete Strong Customer Authentication (SCA):
 ```bash
-go run ./cmd/enable-banking-go setup
+go run ./cmd/fin-mcp setup
 ```
 
 ### 3. Launch the TUI Operator Console
 Once authorized, open the console to inspect the connection, accounts, balances, and transactions (read-only), and to copy your MCP client config:
 ```bash
-go run ./cmd/enable-banking-go tui
+go run ./cmd/fin-mcp tui
 ```
 
 ### 4. Run MCP Server
 Start the Model Context Protocol server to connect your bank accounts to any AI Agent (e.g., Claude Desktop, Gemini):
 ```bash
-go run ./cmd/enable-banking-go server --config config.json
+go run ./cmd/fin-mcp server --config config.json
 ```
 
 ---
@@ -109,9 +109,9 @@ To connect the MCP server to **Claude Desktop**, add the following block to your
 ```json
 {
   "mcpServers": {
-    "enable-banking": {
+    "fin-mcp": {
       "command": "go",
-      "args": ["run", "./cmd/enable-banking-go", "server", "--config", "/absolute/path/to/config.json"]
+      "args": ["run", "./cmd/fin-mcp", "server", "--config", "/absolute/path/to/config.json"]
     }
   }
 }
@@ -122,7 +122,7 @@ If running the server on a remote cluster or container:
 ```json
 {
   "mcpServers": {
-    "enable-banking": {
+    "fin-mcp": {
       "url": "http://your-server-ip:8090/sse?token=highly-secure-mcp-access-token"
     }
   }
@@ -160,7 +160,7 @@ If running the server on a remote cluster or container:
 ### Project Layout
 
 ```
-cmd/enable-banking-go/   # Thin main() entrypoint
+cmd/fin-mcp/   # Thin main() entrypoint
 internal/                # Private application code
   cli/                   #   Kong command tree (Run() pattern)
   config/                #   Config loading, env overrides & validation

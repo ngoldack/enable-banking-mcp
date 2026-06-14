@@ -12,27 +12,27 @@ tasks:
       - go mod tidy
 
   build:
-    desc: Builds the enable-banking-go executable
+    desc: Builds the fin-mcp executable
     cmds:
-      - go build -o enable-banking-go ./cmd/enable-banking-go
+      - go build -o fin-mcp ./cmd/fin-mcp
 
   setup:
     desc: Runs the interactive TUI setup wizard
     cmds:
-      - go run ./cmd/enable-banking-go setup
+      - go run ./cmd/fin-mcp setup
 
   server:
     desc: Runs the Enable Banking MCP server (requires config.json)
     cmds:
-      - go run ./cmd/enable-banking-go server --config config.json
+      - go run ./cmd/fin-mcp server --config config.json
 
   tui:
     desc: Runs the beautiful Bubble Tea TUI Pocket Dashboard (requires config.json)
     cmds:
-      - go run ./cmd/enable-banking-go tui --config config.json
+      - go run ./cmd/fin-mcp tui --config config.json
 
   clean:
     desc: Deletes compiled binaries and temporary certificates
     cmds:
-      - rm -f enable-banking-go
+      - rm -f fin-mcp
       - echo "Clean completed"

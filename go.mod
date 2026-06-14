@@ -1,4 +1,4 @@
-module github.com/ngoldack/enable-banking-go
+module github.com/ngoldack/fin-mcp
 
 go 1.25.5
 

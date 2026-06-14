@@ -13,16 +13,16 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/ngoldack/enable-banking-go/internal/bank"
-	"github.com/ngoldack/enable-banking-go/internal/config"
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/bank"
+	"github.com/ngoldack/fin-mcp/internal/config"
+	"github.com/ngoldack/fin-mcp/internal/provider"
 	"golang.org/x/sync/errgroup"
 )
 
 type MCPServer struct {
 	configPath string
 	config     *config.Config
-	client     enablebanking.APIClient
+	provider   provider.Provider
 	cache      *bank.Cache
 }
 
@@ -32,14 +32,22 @@ func NewMCPServer(configPath string) (*MCPServer, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client := enablebanking.NewClient(cfg.EnableBanking.AppID, cfg.EnableBanking.PrivateKeyPath, cfg.EnableBanking.PrivateKeyContent, cfg.EnableBanking.Environment)
+	registry, err := provider.FromConfig(cfg, configPath)
+	if err != nil {
+		return nil, err
+	}
+	prov, ok := registry.Default()
+	if !ok {
+		return nil, fmt.Errorf("no bank provider configured")
+	}
+
 	ttl := time.Duration(cfg.MCP.CacheTTLMinutes) * time.Minute
 	bCache := bank.NewCache(".bank.db", ttl)
 
 	return &MCPServer{
 		configPath: configPath,
 		config:     cfg,
-		client:     client,
+		provider:   prov,
 		cache:      bCache,
 	}, nil
 }
@@ -131,31 +139,10 @@ func formatTransactionsMarkdown(txs []bank.Transaction) string {
 }
 
 func (s *MCPServer) checkSessionValid(ctx context.Context) error {
-	slog.DebugContext(ctx, "checking bank session validity", "session_id", s.config.EnableBanking.SessionID)
-
-	if s.config.EnableBanking.SessionID == "" {
-		return fmt.Errorf("no active bank session found. Please run the TUI or setup to link your bank account first")
+	slog.DebugContext(ctx, "verifying provider connection", "provider", s.provider.Name())
+	if _, err := s.provider.VerifyConnection(ctx); err != nil {
+		return err
 	}
-
-	if !s.config.IsSessionValid() {
-		return fmt.Errorf("the bank session consent has expired. Please run the setup to re-authenticate and renew consent")
-	}
-
-	sess, err := s.client.GetSession(ctx, s.config.EnableBanking.SessionID)
-	if err != nil {
-		return fmt.Errorf("failed to verify bank session: %w. Your session may have been invalidated", err)
-	}
-
-	if sess.Status != "AUTHORIZED" {
-		return fmt.Errorf("bank session status is %s, expected AUTHORIZED. Please run the setup again to refresh", sess.Status)
-	}
-
-	if !sess.Access.ValidUntil.IsZero() && !sess.Access.ValidUntil.Equal(s.config.EnableBanking.ConsentValidUntil) {
-		slog.InfoContext(ctx, "updating bank session consent expiration date", "new_date", sess.Access.ValidUntil)
-		s.config.EnableBanking.ConsentValidUntil = sess.Access.ValidUntil
-		_ = config.SaveConfig(s.configPath, s.config)
-	}
-
 	return nil
 }
 
@@ -167,24 +154,10 @@ func (s *MCPServer) getAccountsList(ctx context.Context, refresh bool) ([]bank.A
 		}
 	}
 
-	slog.DebugContext(ctx, "cache miss for bank accounts list, fetching fresh details from API")
-	sess, err := s.client.GetSession(ctx, s.config.EnableBanking.SessionID)
+	slog.DebugContext(ctx, "cache miss for bank accounts list, fetching from provider")
+	accounts, err := s.provider.ListAccounts(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve session details: %w", err)
-	}
-
-	var accounts []bank.Account
-	for _, accID := range sess.Accounts {
-		accDetails, err := s.client.GetAccountDetails(ctx, accID)
-		if err != nil {
-			slog.WarnContext(ctx, "failed to fetch details for bank account", "account_id", accID, "error", err)
-			continue
-		}
-		accounts = append(accounts, bank.MapAccountToDomain(*accDetails, s.config.EnableBanking.BankName))
-	}
-
-	if len(accounts) == 0 {
-		return nil, fmt.Errorf("no accounts linked or accessible in this session")
+		return nil, err
 	}
 
 	slog.DebugContext(ctx, "saving retrieved accounts list to database cache", "count", len(accounts))
@@ -240,31 +213,29 @@ func (s *MCPServer) handleGetBalances(ctx context.Context, req *mcp.CallToolRequ
 		}
 	}
 
-	slog.DebugContext(ctx, "cache miss for account balances, fetching fresh from API", "account_id", args.AccountID)
-	balances, err := s.client.GetBalances(ctx, args.AccountID)
+	slog.DebugContext(ctx, "cache miss for account balances, fetching from provider", "account_id", args.AccountID)
+	balances, err := s.provider.GetBalances(ctx, args.AccountID)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to fetch balances from API", "account_id", args.AccountID, "error", err)
+		slog.ErrorContext(ctx, "failed to fetch balances", "account_id", args.AccountID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch balances: %v", err))
 	}
 
-	domainBals, available, booked := bank.MapBalancesToDomain(balances)
-
 	// Fetch current details from cache or construct
 	detail, _ := s.cache.GetDetail(ctx, args.AccountID)
-	detail.Balances = domainBals
+	detail.Balances = balances.Items
 	detail.Account.ID = args.AccountID
-	detail.Account.AvailableBalance = available
-	detail.Account.BookedBalance = booked
+	detail.Account.AvailableBalance = balances.Available
+	detail.Account.BookedBalance = balances.Booked
 
 	slog.DebugContext(ctx, "updating cache with retrieved balances", "account_id", args.AccountID)
 	s.cache.SetDetail(ctx, args.AccountID, detail)
 
-	md := formatBalancesMarkdown(domainBals)
+	md := formatBalancesMarkdown(balances.Items)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
 			&mcp.TextContent{Text: md},
 		},
-		StructuredContent: domainBals,
+		StructuredContent: balances.Items,
 	}, nil, nil
 }
 
@@ -301,14 +272,12 @@ func (s *MCPServer) handleListTransactions(ctx context.Context, req *mcp.CallToo
 		}
 	}
 
-	slog.DebugContext(ctx, "cache miss for transactions list, fetching fresh from API", "account_id", args.AccountID)
-	txs, err := s.client.GetTransactions(ctx, args.AccountID, args.DateFrom, args.DateTo)
+	slog.DebugContext(ctx, "cache miss for transactions list, fetching from provider", "account_id", args.AccountID)
+	domainTxs, err := s.provider.GetTransactions(ctx, args.AccountID, args.DateFrom, args.DateTo)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to fetch transactions from API", "account_id", args.AccountID, "error", err)
+		slog.ErrorContext(ctx, "failed to fetch transactions", "account_id", args.AccountID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch transactions: %v", err))
 	}
-
-	domainTxs := bank.MapTransactionsToDomain(txs)
 
 	// Only save to cache if this is a general fetch without filters
 	if args.DateFrom == "" && args.DateTo == "" {
@@ -362,22 +331,18 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 		}
 	}
 
-	slog.InfoContext(ctx, "creating payment on bank API", "creditor_iban", args.CreditorIban, "amount", args.Amount)
-	state := fmt.Sprintf("pay-%d", time.Now().UnixNano())
+	slog.InfoContext(ctx, "initiating payment via provider", "creditor_iban", args.CreditorIban, "amount", args.Amount)
 
-	paymentResp, err := s.client.CreatePayment(
-		ctx,
-		args.DebtorIban,
-		args.CreditorIban,
-		args.CreditorName,
-		args.Amount,
-		args.Currency,
-		args.PaymentType,
-		state,
-		s.config.EnableBanking.RedirectURL,
-	)
+	paymentResp, err := s.provider.InitiateTransfer(ctx, bank.TransferRequest{
+		DebtorIBAN:   args.DebtorIban,
+		CreditorIBAN: args.CreditorIban,
+		CreditorName: args.CreditorName,
+		Amount:       args.Amount,
+		Currency:     args.Currency,
+		PaymentType:  args.PaymentType,
+	})
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to create payment on bank API", "error", err)
+		slog.ErrorContext(ctx, "failed to initiate transfer", "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to initiate transfer: %v", err))
 	}
 
@@ -388,13 +353,13 @@ func (s *MCPServer) handleInitiateTransfer(ctx context.Context, req *mcp.CallToo
 		"- Current Status: %s\n",
 		paymentResp.PaymentID, paymentResp.Status)
 
-	if paymentResp.URL != "" {
+	if paymentResp.AuthURL != "" {
 		responseMsg += fmt.Sprintf("\n⚠️  **ACTION REQUIRED:** The user must authorize this transfer by navigating to this URL in a browser:\n"+
 			"%s\n\n"+
 			"Once the user completes authentication at their bank, they will be redirected. "+
 			"Then, you should call `get-payment-status` to verify it is authorized (usually accepts status 'ACCC' or similar). "+
 			"If the bank supports deferred execution, call `submit-transfer` with the Payment ID to execute the payment.",
-			paymentResp.URL)
+			paymentResp.AuthURL)
 	} else {
 		responseMsg += "\nNo authorization URL returned. Please check `get-payment-status` to see if the payment is already accepted or pending."
 	}
@@ -409,7 +374,7 @@ func (s *MCPServer) handleGetPaymentStatus(ctx context.Context, req *mcp.CallToo
 		return makeErrorResult("payment_id is required")
 	}
 
-	payment, err := s.client.GetPayment(ctx, args.PaymentID)
+	payment, err := s.provider.PaymentStatus(ctx, args.PaymentID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to retrieve payment status", "payment_id", args.PaymentID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to fetch payment: %v", err))
@@ -432,7 +397,7 @@ func (s *MCPServer) handleSubmitTransfer(ctx context.Context, req *mcp.CallToolR
 		return makeErrorResult("payment_id is required")
 	}
 
-	resp, err := s.client.SubmitPayment(ctx, args.PaymentID)
+	resp, err := s.provider.SubmitTransfer(ctx, args.PaymentID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to submit payment for execution", "payment_id", args.PaymentID, "error", err)
 		return makeErrorResult(fmt.Sprintf("failed to submit payment for execution: %v", err))
@@ -441,9 +406,6 @@ func (s *MCPServer) handleSubmitTransfer(ctx context.Context, req *mcp.CallToolR
 	slog.InfoContext(ctx, "payment submitted successfully", "payment_id", args.PaymentID, "status", resp.Status)
 
 	msg := "Payment successfully submitted for execution!"
-	if resp.Message != "" {
-		msg += "\nDetails: " + resp.Message
-	}
 	if resp.Status != "" {
 		msg += "\nNew Status: " + resp.Status
 	}
@@ -509,7 +471,7 @@ func RunMCPServer(configPath string) error {
 	slog.SetDefault(logger)
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "enable-banking-mcp",
+		Name:    "fin-mcp",
 		Version: "1.0.0",
 	}, nil)
 

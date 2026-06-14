@@ -14,9 +14,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ngoldack/enable-banking-go/internal/bank"
-	"github.com/ngoldack/enable-banking-go/internal/config"
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/bank"
+	"github.com/ngoldack/fin-mcp/internal/config"
+	"github.com/ngoldack/fin-mcp/internal/provider"
 )
 
 // viewState enumerates the operator-console screens.
@@ -62,7 +62,7 @@ func (i accountItem) FilterValue() string { return i.acc.Name + " " + i.acc.IBAN
 type Model struct {
 	configPath string
 	cfg        *config.Config
-	client     enablebanking.APIClient
+	prov       provider.Provider
 	cache      *bank.Cache
 
 	state      viewState
@@ -96,7 +96,7 @@ type accountDetailMsg struct {
 
 // Commands.
 
-func fetchAccountsCmd(client enablebanking.APIClient, sessionID, bankName string, cache *bank.Cache, refresh bool) tea.Cmd {
+func fetchAccountsCmd(prov provider.Provider, cache *bank.Cache, refresh bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -107,21 +107,9 @@ func fetchAccountsCmd(client enablebanking.APIClient, sessionID, bankName string
 			}
 		}
 
-		sess, err := client.GetSession(ctx, sessionID)
+		accounts, err := prov.ListAccounts(ctx)
 		if err != nil {
 			return errorMsg(err)
-		}
-
-		var accounts []bank.Account
-		for _, accID := range sess.Accounts {
-			accDetails, err := client.GetAccountDetails(ctx, accID)
-			if err != nil {
-				continue
-			}
-			accounts = append(accounts, bank.MapAccountToDomain(*accDetails, bankName))
-		}
-		if len(accounts) == 0 {
-			return errorMsg(fmt.Errorf("no bank accounts found in this session"))
 		}
 
 		cache.SetAccounts(ctx, accounts)
@@ -129,7 +117,7 @@ func fetchAccountsCmd(client enablebanking.APIClient, sessionID, bankName string
 	}
 }
 
-func fetchAccountDetailCmd(client enablebanking.APIClient, accountID string, cache *bank.Cache, refresh bool) tea.Cmd {
+func fetchAccountDetailCmd(prov provider.Provider, accountID string, cache *bank.Cache, refresh bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -140,26 +128,25 @@ func fetchAccountDetailCmd(client enablebanking.APIClient, accountID string, cac
 			}
 		}
 
-		balances, err := client.GetBalances(ctx, accountID)
+		balances, err := prov.GetBalances(ctx, accountID)
 		if err != nil {
 			return accountDetailMsg{err: fmt.Errorf("failed to fetch balances: %w", err)}
 		}
-		domainBals, available, booked := bank.MapBalancesToDomain(balances)
 
 		var domainTxs []bank.Transaction
-		if txs, err := client.GetTransactions(ctx, accountID, "", ""); err == nil {
-			domainTxs = bank.MapTransactionsToDomain(txs)
+		if txs, err := prov.GetTransactions(ctx, accountID, "", ""); err == nil {
+			domainTxs = txs
 		}
 
 		detail, _ := cache.GetDetail(ctx, accountID)
 		detail.Account.ID = accountID
-		detail.Account.AvailableBalance = available
-		detail.Account.BookedBalance = booked
-		detail.Balances = domainBals
+		detail.Account.AvailableBalance = balances.Available
+		detail.Account.BookedBalance = balances.Booked
+		detail.Balances = balances.Items
 		detail.Transactions = domainTxs
 		cache.SetDetail(ctx, accountID, detail)
 
-		return accountDetailMsg{balances: domainBals, transactions: domainTxs}
+		return accountDetailMsg{balances: balances.Items, transactions: domainTxs}
 	}
 }
 
@@ -169,18 +156,22 @@ func NewModel(configPath string) (*Model, error) {
 		return nil, err
 	}
 
-	client := enablebanking.NewClient(
-		cfg.EnableBanking.AppID, cfg.EnableBanking.PrivateKeyPath,
-		cfg.EnableBanking.PrivateKeyContent, cfg.EnableBanking.Environment,
-	)
+	registry, err := provider.FromConfig(cfg, configPath)
+	if err != nil {
+		return nil, err
+	}
+	prov, ok := registry.Default()
+	if !ok {
+		return nil, fmt.Errorf("no bank provider configured")
+	}
 	bCache := bank.NewCache(".bank.db", time.Duration(cfg.MCP.CacheTTLMinutes)*time.Minute)
 
-	return newModel(configPath, cfg, client, bCache), nil
+	return newModel(configPath, cfg, prov, bCache), nil
 }
 
 // newModel assembles the model from injected dependencies (no I/O), which keeps
-// it unit-testable with mock clients and a temp cache.
-func newModel(configPath string, cfg *config.Config, client enablebanking.APIClient, cache *bank.Cache) *Model {
+// it unit-testable with a mock provider and a temp cache.
+func newModel(configPath string, cfg *config.Config, prov provider.Provider, cache *bank.Cache) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accentColor)
@@ -198,7 +189,7 @@ func newModel(configPath string, cfg *config.Config, client enablebanking.APICli
 	return &Model{
 		configPath: configPath,
 		cfg:        cfg,
-		client:     client,
+		prov:       prov,
 		cache:      cache,
 		state:      viewLoading,
 		status:     "Loading bank accounts…",
@@ -223,7 +214,7 @@ func newTable(cols []table.Column) table.Model {
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		fetchAccountsCmd(m.client, m.cfg.EnableBanking.SessionID, m.cfg.EnableBanking.BankName, m.cache, false),
+		fetchAccountsCmd(m.prov, m.cache, false),
 	)
 }
 
@@ -311,12 +302,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selected = it.acc
 				m.state = viewLoading
 				m.status = "Loading balances & transactions…"
-				return m, tea.Batch(m.spinner.Tick, fetchAccountDetailCmd(m.client, it.acc.ID, m.cache, false))
+				return m, tea.Batch(m.spinner.Tick, fetchAccountDetailCmd(m.prov, it.acc.ID, m.cache, false))
 			}
 		case key.Matches(msg, m.keys.Refresh):
 			m.state = viewLoading
 			m.status = "Refreshing accounts…"
-			return m, tea.Batch(m.spinner.Tick, fetchAccountsCmd(m.client, m.cfg.EnableBanking.SessionID, m.cfg.EnableBanking.BankName, m.cache, true))
+			return m, tea.Batch(m.spinner.Tick, fetchAccountsCmd(m.prov, m.cache, true))
 		}
 		var cmd tea.Cmd
 		m.accounts, cmd = m.accounts.Update(msg)
@@ -334,7 +325,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Refresh):
 			m.state = viewLoading
 			m.status = "Refreshing account…"
-			return m, tea.Batch(m.spinner.Tick, fetchAccountDetailCmd(m.client, m.selected.ID, m.cache, true))
+			return m, tea.Batch(m.spinner.Tick, fetchAccountDetailCmd(m.prov, m.selected.ID, m.cache, true))
 		}
 		var cmd tea.Cmd
 		m.txns, cmd = m.txns.Update(msg)
@@ -507,9 +498,9 @@ func (m *Model) mcpClientConfigSnippet() string {
 		if m.cfg.MCP.BearerToken != "" {
 			url += "?token=" + m.cfg.MCP.BearerToken
 		}
-		return fmt.Sprintf("{\n  \"mcpServers\": {\n    \"enable-banking\": {\n      \"url\": \"%s\"\n    }\n  }\n}", url)
+		return fmt.Sprintf("{\n  \"mcpServers\": {\n    \"fin-mcp\": {\n      \"url\": \"%s\"\n    }\n  }\n}", url)
 	}
-	return fmt.Sprintf("{\n  \"mcpServers\": {\n    \"enable-banking\": {\n      \"command\": \"enable-banking-go\",\n      \"args\": [\"server\", \"--config\", \"%s\"]\n    }\n  }\n}", m.configPath)
+	return fmt.Sprintf("{\n  \"mcpServers\": {\n    \"fin-mcp\": {\n      \"command\": \"fin-mcp\",\n      \"args\": [\"server\", \"--config\", \"%s\"]\n    }\n  }\n}", m.configPath)
 }
 
 func (m *Model) renderAbbreviationsHelp() string {

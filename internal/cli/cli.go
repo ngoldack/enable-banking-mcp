@@ -10,9 +10,9 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/mattn/go-isatty"
 
-	"github.com/ngoldack/enable-banking-go/internal/mcp"
-	"github.com/ngoldack/enable-banking-go/internal/setup"
-	"github.com/ngoldack/enable-banking-go/internal/tui"
+	"github.com/ngoldack/fin-mcp/internal/mcp"
+	"github.com/ngoldack/fin-mcp/internal/setup"
+	"github.com/ngoldack/fin-mcp/internal/tui"
 )
 
 // CLI is the root command tree parsed by Kong.
@@ -79,7 +79,7 @@ func (c *TUICmd) Run() error {
 func Run() {
 	var cli CLI
 	ctx := kong.Parse(&cli,
-		kong.Name("enable-banking-go"),
+		kong.Name("fin-mcp"),
 		kong.Description("Enable Banking CLI Suite — reusable SDK, MCP server & TUI dashboard."),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{

@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/mattn/go-isatty"
-	"github.com/ngoldack/enable-banking-go/internal/config"
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/config"
+	"github.com/ngoldack/fin-mcp/pkg/enablebanking"
 )
 
 func GenerateRSAKeyAndCertificate(keyPath, certPath string) error {
@@ -302,9 +302,9 @@ func RunInteractiveSetup(configPath string) error {
 	fmt.Println()
 	fmt.Printf("Configuration saved to: %s\n", configPath)
 	fmt.Println("You can now start your MCP Server with:")
-	fmt.Printf("  go run ./cmd/enable-banking-go server --config %s\n", configPath)
+	fmt.Printf("  go run ./cmd/fin-mcp server --config %s\n", configPath)
 	fmt.Println("Or run the TUI Dashboard with:")
-	fmt.Printf("  go run ./cmd/enable-banking-go tui --config %s\n", configPath)
+	fmt.Printf("  go run ./cmd/fin-mcp tui --config %s\n", configPath)
 	fmt.Println()
 
 	return nil
@@ -404,7 +404,7 @@ func RunFlagSetup(configPath, appID, keyPath, environment, redirectURL, country,
 	fmt.Println(authResp.URL)
 	fmt.Println()
 	fmt.Println("After authorizing, run setup again with the code:")
-	fmt.Printf("  go run ./cmd/enable-banking-go setup --code <CODE>\n")
+	fmt.Printf("  go run ./cmd/fin-mcp setup --code <CODE>\n")
 	fmt.Println()
 
 	return nil

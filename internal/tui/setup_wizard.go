@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngoldack/enable-banking-go/internal/config"
-	"github.com/ngoldack/enable-banking-go/internal/setup"
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/config"
+	"github.com/ngoldack/fin-mcp/internal/setup"
+	"github.com/ngoldack/fin-mcp/pkg/enablebanking"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"

@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/pkg/enablebanking"
 )
 
 // Helper to generate a temporary RSA private key for testing JWT signatures

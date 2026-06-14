@@ -14,7 +14,7 @@
 # Written for POSIX /bin/sh (Alpine busybox) — no bashisms (e.g. `wait -n`).
 set -u
 
-app_bin="/app/enable-banking-go"
+app_bin="/app/fin-mcp"
 agent_bin="/otel-go-instrumentation"
 
 # 1. Launch the target application with whatever args were passed (CMD / docker run).

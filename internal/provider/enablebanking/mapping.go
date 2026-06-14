@@ -1,23 +1,22 @@
-package bank
+package enablebanking
 
 import (
 	"fmt"
 
-	"github.com/ngoldack/enable-banking-go/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/bank"
+	eb "github.com/ngoldack/fin-mcp/pkg/enablebanking"
 )
 
-func MapAccountToDomain(acc enablebanking.AccountResource, bankName string) Account {
+func mapAccount(acc eb.AccountResource, bankName string) bank.Account {
 	iban := acc.AccountID.Iban
 	if iban == "" {
 		iban = acc.AccountID.BBan
 	}
-
 	name := acc.Name
 	if name == "" {
 		name = "Standard Account"
 	}
-
-	return Account{
+	return bank.Account{
 		ID:       acc.Uid,
 		Name:     name,
 		BankName: bankName,
@@ -26,14 +25,14 @@ func MapAccountToDomain(acc enablebanking.AccountResource, bankName string) Acco
 	}
 }
 
-func MapBalancesToDomain(balances []enablebanking.BalanceResource) ([]AccountBalance, string, string) {
-	var domainBalances []AccountBalance
+func mapBalances(balances []eb.BalanceResource) ([]bank.AccountBalance, string, string) {
+	var out []bank.AccountBalance
 	var available, booked string
 
-	for _, bal := range balances {
-		name := bal.Name
+	for _, b := range balances {
+		name := b.Name
 		if name == "" {
-			switch bal.BalanceType {
+			switch b.BalanceType {
 			case "CLBD":
 				name = "Booked Balance"
 			case "ITBD":
@@ -50,42 +49,35 @@ func MapBalancesToDomain(balances []enablebanking.BalanceResource) ([]AccountBal
 				name = "Account Balance"
 			}
 		}
+		out = append(out, bank.AccountBalance{Name: name, Amount: b.BalanceAmount.Amount})
 
-		domainBalances = append(domainBalances, AccountBalance{
-			Name:   name,
-			Amount: bal.BalanceAmount.Amount,
-		})
-
-		// Track primary available and booked balances
-		switch bal.BalanceType {
+		switch b.BalanceType {
 		case "CLAV", "ITAV":
-			available = bal.BalanceAmount.Amount
+			available = b.BalanceAmount.Amount
 		case "CLBD", "ITBD":
-			booked = bal.BalanceAmount.Amount
+			booked = b.BalanceAmount.Amount
 		}
 	}
 
-	// Fallbacks if specific types are missing
 	if available == "" {
 		if booked != "" {
 			available = booked
-		} else if len(domainBalances) > 0 {
-			available = domainBalances[0].Amount
+		} else if len(out) > 0 {
+			available = out[0].Amount
 		}
 	}
 	if booked == "" {
 		if available != "" {
 			booked = available
-		} else if len(domainBalances) > 0 {
-			booked = domainBalances[0].Amount
+		} else if len(out) > 0 {
+			booked = out[0].Amount
 		}
 	}
-
-	return domainBalances, available, booked
+	return out, available, booked
 }
 
-func MapTransactionsToDomain(txs []enablebanking.Transaction) []Transaction {
-	var domainTxs []Transaction
+func mapTransactions(txs []eb.Transaction) []bank.Transaction {
+	var out []bank.Transaction
 	for _, tx := range txs {
 		date := tx.BookingDate
 		if date == "" {
@@ -115,8 +107,6 @@ func MapTransactionsToDomain(txs []enablebanking.Transaction) []Transaction {
 				}
 			}
 		}
-
-		// Include remittance info in description if available
 		if len(tx.RemittanceInformation) > 0 && tx.RemittanceInformation[0] != "" {
 			desc = fmt.Sprintf("%s (%s)", desc, tx.RemittanceInformation[0])
 		}
@@ -134,7 +124,7 @@ func MapTransactionsToDomain(txs []enablebanking.Transaction) []Transaction {
 			status = "Pending"
 		}
 
-		domainTxs = append(domainTxs, Transaction{
+		out = append(out, bank.Transaction{
 			ID:               tx.TransactionID,
 			Date:             date,
 			Description:      desc,
@@ -145,5 +135,5 @@ func MapTransactionsToDomain(txs []enablebanking.Transaction) []Transaction {
 			CounterpartyIban: counterpartyIban,
 		})
 	}
-	return domainTxs
+	return out
 }
