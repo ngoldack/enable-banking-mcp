@@ -5,20 +5,19 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/setup"
-	"github.com/ngoldack/fin-mcp/pkg/enablebanking"
+	"github.com/ngoldack/fin-mcp/internal/setupflow"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
+// CountryOption is a selectable ISO 3166-1 country for bank discovery.
 type CountryOption struct {
 	Code string
 	Name string
@@ -43,160 +42,206 @@ var countryOptions = []CountryOption{
 	{Code: "GB", Name: "United Kingdom"},
 }
 
-// Setup Steps
+// Wizard steps (provider-agnostic).
 const (
-	stepKeypairChoice = iota
-	stepSummary
+	stepType = iota
+	stepName
 	stepCredentials
-	stepBankFetch
-	stepBankSelect
-	stepAuthRedirect
-	stepCodeExchange
+	stepInstructions
+	stepCountry
+	stepBank
+	stepAuth
+	stepCode
 	stepSuccess
 )
 
+// SetupModel is a provider-agnostic setup wizard. It selects a provider type,
+// names the instance, collects the provider's credential fields, then runs that
+// provider's setupflow.Flow (bank discovery + SCA authorization) to mint a
+// connection — all without knowing anything provider-specific.
 type SetupModel struct {
 	configPath string
-	step       int
-	err        error
-	loading    bool
-	statusMsg  string
 	cfg        *config.Config
-	eb         *config.EnableBankingConfig
-	bankName   string
-	bankCtry   string
-	client     enablebanking.APIClient
+	pc         *config.ProviderConfig
+	flow       setupflow.Flow
 
-	// Step 0: Choice
-	keypairChoiceIdx int // 0: Existing, 1: Generate
+	step      int
+	err       error
+	loading   bool
+	statusMsg string
 
-	// Step 1: Credentials
-	appIDInput       textinput.Model
-	keyPathInput     textinput.Model
-	redirectURLInput textinput.Model
-	focusedInputIdx  int // 0: App ID, 1: Key Path, 2: Redirect URL, 3: Environment Toggle
-	envSelectedIdx   int // 0: SANDBOX, 1: PRODUCTION
-	keysGenerated    bool
+	// Step: provider type
+	types   []config.ProviderType
+	typeIdx int
 
-	// Step 2 & 3: Country / Bank select
-	selectedCountryIdx int
-	banks              []enablebanking.ASPSP
-	filteredBanks      []enablebanking.ASPSP
-	bankSearchInput    textinput.Model
-	selectedBankIdx    int
+	// Step: provider name
+	nameInput textinput.Model
 
-	// Step 4: Redirect
-	authResp    *enablebanking.StartAuthorizationResponse
+	// Step: credentials (rendered generically from flow.CredentialFields)
+	fields       []setupflow.Field
+	inputs       []textinput.Model // aligned with fields (zero value for choice fields)
+	choiceIdx    []int             // aligned with fields (selected choice index)
+	fieldFocus   int
+	values       map[string]string
+	instructions string
+
+	// Step: country / bank
+	countryIdx      int
+	banks           []setupflow.Bank
+	filteredBanks   []setupflow.Bank
+	bankSearchInput textinput.Model
+	bankIdx         int
+	chosenBank      setupflow.Bank
+
+	// Step: authorization redirect
+	authURL     string
 	serverChan  chan string
 	localServer *http.Server
 
-	// Step 5: Code exchange
+	// Step: code exchange
 	codeInput textinput.Model
+
+	connName string
 }
 
 func NewSetupModel(configPath string) *SetupModel {
-	appID := textinput.New()
-	appID.Placeholder = "Enable Banking App ID (UUID)"
-	appID.Focus()
-	appID.CharLimit = 36
-
-	keyPath := textinput.New()
-	keyPath.Placeholder = "Private Key Path (default: private.key)"
-	keyPath.SetValue("private.key")
-	keyPath.CharLimit = 100
+	name := textinput.New()
+	name.Placeholder = "Provider instance name"
+	name.CharLimit = 50
 
 	code := textinput.New()
-	code.Placeholder = "Paste the 'code' parameter from redirection"
-	code.CharLimit = 120
+	code.Placeholder = "Paste the 'code' parameter from the redirect"
+	code.CharLimit = 200
 
 	bankSearch := textinput.New()
-	bankSearch.Placeholder = "Type to search your bank (e.g. C24)..."
+	bankSearch.Placeholder = "Type to search your bank..."
 	bankSearch.CharLimit = 50
 
-	redirectURL := textinput.New()
-	redirectURL.Placeholder = "Redirect URL (default: http://localhost:8080/callback)"
-	redirectURL.SetValue("http://localhost:8080/callback")
-	redirectURL.CharLimit = 150
-
-	return &SetupModel{
-		configPath:         configPath,
-		step:               stepKeypairChoice,
-		keypairChoiceIdx:   0,
-		appIDInput:         appID,
-		keyPathInput:       keyPath,
-		redirectURLInput:   redirectURL,
-		focusedInputIdx:    0,
-		envSelectedIdx:     0, // SANDBOX
-		selectedCountryIdx: 0,
-		codeInput:          code,
-		bankSearchInput:    bankSearch,
+	m := &SetupModel{
+		configPath:      configPath,
+		step:            stepType,
+		types:           setupflow.Types(),
+		nameInput:       name,
+		codeInput:       code,
+		bankSearchInput: bankSearch,
+		values:          map[string]string{},
 	}
+	cfg, err := setup.LoadOrNew(configPath)
+	if err != nil {
+		m.err = err
+		cfg = config.NewDefault()
+	}
+	m.cfg = cfg
+	return m
 }
 
-func (m *SetupModel) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (m *SetupModel) Init() tea.Cmd { return textinput.Blink }
 
-// Setup Commands
+// Commands & messages.
 
+type banksMsg []setupflow.Bank
+type authURLMsg string
+type connMsg config.Connection
 type callbackResultMsg string
 
+func fetchBanksCmd(flow setupflow.Flow, pc *config.ProviderConfig, country string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		banks, err := flow.Banks(ctx, pc, country)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return banksMsg(banks)
+	}
+}
+
+func startAuthCmd(flow setupflow.Flow, pc *config.ProviderConfig, req setupflow.ConnectionRequest) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		url, err := flow.StartConnection(ctx, pc, req)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return authURLMsg(url)
+	}
+}
+
+func completeCmd(flow setupflow.Flow, pc *config.ProviderConfig, req setupflow.ConnectionRequest) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := flow.CompleteConnection(ctx, pc, req)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return connMsg(conn)
+	}
+}
+
 func waitForCallbackCmd(ch chan string) tea.Cmd {
-	return func() tea.Msg {
-		res := <-ch
-		return callbackResultMsg(res)
+	return func() tea.Msg { return callbackResultMsg(<-ch) }
+}
+
+func (m *SetupModel) connectionRequest() setupflow.ConnectionRequest {
+	return setupflow.ConnectionRequest{
+		Bank: m.chosenBank,
+		Code: strings.TrimSpace(m.codeInput.Value()),
+		Days: 90,
 	}
 }
 
-type banksMsg []enablebanking.ASPSP
-type authMsg *enablebanking.StartAuthorizationResponse
-type exchangeMsg *enablebanking.AuthorizeSessionResponse
-
-func fetchBanksForTUISetup(client enablebanking.APIClient, country string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		all, err := client.GetASPSPs(ctx)
-		if err != nil {
-			return errorMsg(err)
-		}
-
-		var filtered []enablebanking.ASPSP
-		for _, aspsp := range all {
-			if strings.EqualFold(aspsp.Country, country) {
-				filtered = append(filtered, aspsp)
+// initCredentialFields prepares the generic input widgets for the selected flow.
+func (m *SetupModel) initCredentialFields() {
+	m.fields = m.flow.CredentialFields()
+	m.inputs = make([]textinput.Model, len(m.fields))
+	m.choiceIdx = make([]int, len(m.fields))
+	m.fieldFocus = 0
+	for i, f := range m.fields {
+		if f.Kind == setupflow.FieldChoice {
+			for j, ch := range f.Choices {
+				if ch == f.Default {
+					m.choiceIdx[i] = j
+				}
 			}
+			continue
 		}
-		return banksMsg(filtered)
+		in := textinput.New()
+		in.Placeholder = f.Label
+		in.CharLimit = 200
+		if f.Kind == setupflow.FieldSecret {
+			in.EchoMode = textinput.EchoPassword
+		}
+		in.SetValue(f.Default)
+		m.inputs[i] = in
+	}
+	m.focusField(0)
+}
+
+func (m *SetupModel) focusField(idx int) {
+	for i := range m.fields {
+		if m.fields[i].Kind != setupflow.FieldChoice {
+			m.inputs[i].Blur()
+		}
+	}
+	m.fieldFocus = idx
+	if idx >= 0 && idx < len(m.fields) && m.fields[idx].Kind != setupflow.FieldChoice {
+		m.inputs[idx].Focus()
 	}
 }
 
-func startAuthorizationTUISetup(client enablebanking.APIClient, aspspName, aspspCountry, redirectURL string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		state := fmt.Sprintf("tuisetup-%d", time.Now().UnixNano())
-		resp, err := client.StartAuthorization(ctx, aspspName, aspspCountry, state, redirectURL, 90)
-		if err != nil {
-			return errorMsg(err)
-		}
-		return authMsg(resp)
+// afterCredentials routes past credential collection: providers needing SCA go
+// to bank discovery; others complete the connection immediately.
+func (m *SetupModel) afterCredentials() (tea.Model, tea.Cmd) {
+	m.err = nil
+	if !m.flow.NeedsAuthorization() {
+		m.loading = true
+		m.statusMsg = "Finalizing connection..."
+		return m, completeCmd(m.flow, m.pc, m.connectionRequest())
 	}
-}
-
-func exchangeCodeTUISetup(client enablebanking.APIClient, code string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		resp, err := client.AuthorizeSession(ctx, code)
-		if err != nil {
-			return errorMsg(err)
-		}
-		return exchangeMsg(resp)
-	}
+	m.step = stepCountry
+	return m, nil
 }
 
 func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -206,12 +251,17 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.step == stepCredentials || m.step == stepName || m.step == stepCode || m.step == stepBank {
+				// 'q' is a valid character in these text-entry steps; only quit on ctrl+c.
+				if msg.String() == "q" {
+					break
+				}
+			}
 			return m, tea.Quit
 		case "esc":
-			if m.step > stepKeypairChoice {
+			if m.step > stepType && !m.loading {
 				m.step--
 				m.err = nil
-				m.loading = false
 				return m, nil
 			}
 		}
@@ -224,668 +274,467 @@ func (m *SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case banksMsg:
 		m.loading = false
 		m.banks = msg
-		m.filteredBanks = msg // Initially show all
+		m.filteredBanks = msg
 		if len(m.banks) == 0 {
-			m.err = fmt.Errorf("no banks found for country %s", countryOptions[m.selectedCountryIdx].Code)
-			m.step = stepBankFetch
-		} else {
-			m.step = stepBankSelect
-			m.selectedBankIdx = 0
-			m.bankSearchInput.SetValue("")
-			m.bankSearchInput.Focus()
+			m.err = fmt.Errorf("no banks found for %s", countryOptions[m.countryIdx].Code)
+			return m, nil
 		}
+		m.step = stepBank
+		m.bankIdx = 0
+		m.bankSearchInput.SetValue("")
+		m.bankSearchInput.Focus()
 		return m, nil
 
-	case authMsg:
+	case authURLMsg:
 		m.loading = false
-		m.authResp = msg
-		m.step = stepAuthRedirect
-		m.startLocalCallbackServer()
+		m.authURL = string(msg)
+		m.step = stepAuth
+		m.startCallbackServer()
 		return m, waitForCallbackCmd(m.serverChan)
 
 	case callbackResultMsg:
 		result := string(msg)
 		if strings.HasPrefix(result, "error:") {
 			m.err = fmt.Errorf("bank authorization failed: %s", strings.TrimPrefix(result, "error:"))
-			m.step = stepCodeExchange
+			m.step = stepCode
 			m.codeInput.Focus()
-		} else {
-			m.codeInput.SetValue(result)
-			m.loading = true
-			m.statusMsg = "Exchanging captured authorization code..."
-			m.err = nil
-			return m, exchangeCodeTUISetup(m.client, result)
-		}
-		return m, nil
-
-	case exchangeMsg:
-		m.loading = false
-		m.eb.Connections = append(m.eb.Connections, config.Connection{
-			Name:              connSlug(m.bankName),
-			Bank:              m.bankName,
-			Country:           config.CountryCode(m.bankCtry),
-			SessionID:         msg.SessionID,
-			ConsentValidUntil: msg.Access.ValidUntil,
-		})
-
-		// Save configuration
-		err := config.SaveConfig(m.configPath, m.cfg)
-		if err != nil {
-			m.err = err
-			m.step = stepCodeExchange
 			return m, nil
 		}
+		m.codeInput.SetValue(result)
+		m.loading = true
+		m.statusMsg = "Exchanging captured authorization code..."
+		m.err = nil
+		return m, completeCmd(m.flow, m.pc, m.connectionRequest())
 
+	case connMsg:
+		m.loading = false
+		conn := config.Connection(msg)
+		setupflow.Upsert(m.pc, conn)
+		if err := config.SaveConfig(m.configPath, m.cfg); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.connName = conn.Name
 		m.step = stepSuccess
 		return m, nil
 	}
 
-	// Step-specific Keyboard Inputs
 	switch m.step {
-	case stepKeypairChoice:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "up":
-				if m.keypairChoiceIdx > 0 {
-					m.keypairChoiceIdx--
-				}
-			case "down":
-				if m.keypairChoiceIdx < 1 {
-					m.keypairChoiceIdx++
-				}
-			case "enter":
-				m.step = stepSummary
-				return m, nil
-			}
-		}
-
-	case stepSummary:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "enter":
-				m.step = stepCredentials
-				if m.keypairChoiceIdx == 1 {
-					// Generate Keypair flow: generate keys immediately
-					if !m.keysGenerated {
-						m.loading = true
-						m.statusMsg = "Generating secure 4096-bit RSA private key and self-signed certificate..."
-						err := setup.GenerateRSAKeyAndCertificate("private.key", "public.crt")
-						if err != nil {
-							m.loading = false
-							m.err = fmt.Errorf("failed to generate RSA keys: %w", err)
-							return m, nil
-						}
-						m.keysGenerated = true
-						m.loading = false
-						m.keyPathInput.SetValue("private.key")
-						// Pre-focus the App ID input since they have the keys now
-						m.appIDInput.Focus()
-						m.focusedInputIdx = 0
-					}
-				} else {
-					// Existing Keypair flow: focus App ID
-					m.appIDInput.Focus()
-					m.focusedInputIdx = 0
-				}
-				return m, nil
-			}
-		}
-
+	case stepType:
+		return m.updateType(msg)
+	case stepName:
+		return m.updateName(msg)
 	case stepCredentials:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "o":
-				// Let them press [O] to open Browser for Control Panel with pre-filled parameters dynamically!
-				redirectVal := strings.TrimSpace(m.redirectURLInput.Value())
-				regURL := fmt.Sprintf("https://enablebanking.com/cp/applications?name=Enable+Banking+Go+MCP&redirect_urls=%s&environment=SANDBOX", strings.ReplaceAll(redirectVal, "/", "%2F"))
-				_ = OpenBrowser(regURL)
-				return m, nil
-
-			case "tab", "down":
-				m.appIDInput.Blur()
-				m.keyPathInput.Blur()
-				m.redirectURLInput.Blur()
-				m.focusedInputIdx = (m.focusedInputIdx + 1) % 4
-				switch m.focusedInputIdx {
-				case 0:
-					m.appIDInput.Focus()
-				case 1:
-					m.keyPathInput.Focus()
-				case 2:
-					m.redirectURLInput.Focus()
-				}
-				return m, nil
-
-			case "up":
-				m.appIDInput.Blur()
-				m.keyPathInput.Blur()
-				m.redirectURLInput.Blur()
-				m.focusedInputIdx = (m.focusedInputIdx - 1 + 4) % 4
-				switch m.focusedInputIdx {
-				case 0:
-					m.appIDInput.Focus()
-				case 1:
-					m.keyPathInput.Focus()
-				case 2:
-					m.redirectURLInput.Focus()
-				}
-				return m, nil
-
-			case "left", "right", "space", "h", "l":
-				if m.focusedInputIdx == 3 {
-					m.envSelectedIdx = (m.envSelectedIdx + 1) % 2
-					return m, nil
-				}
-
-			case "enter":
-				if m.focusedInputIdx < 3 {
-					m.appIDInput.Blur()
-					m.keyPathInput.Blur()
-					m.redirectURLInput.Blur()
-					m.focusedInputIdx++
-					switch m.focusedInputIdx {
-					case 1:
-						m.keyPathInput.Focus()
-					case 2:
-						m.redirectURLInput.Focus()
-					}
-					return m, nil
-				}
-
-				// Complete Step 1!
-				appID := strings.TrimSpace(m.appIDInput.Value())
-				keyPath := strings.TrimSpace(m.keyPathInput.Value())
-				redirectVal := strings.TrimSpace(m.redirectURLInput.Value())
-				env := "SANDBOX"
-				if m.envSelectedIdx == 1 {
-					env = "PRODUCTION"
-				}
-
-				if appID == "" || keyPath == "" || redirectVal == "" {
-					m.err = fmt.Errorf("all fields are required")
-					return m, nil
-				}
-
-				// Verify Private Key exists (and generate if somehow missing in custom typing)
-				if _, err := os.Stat(keyPath); err != nil {
-					m.loading = true
-					m.statusMsg = "Generating secure RSA key pair..."
-					err := setup.GenerateRSAKeyAndCertificate(keyPath, "public.crt")
-					if err != nil {
-						m.loading = false
-						m.err = fmt.Errorf("failed to generate RSA keys: %w", err)
-						return m, nil
-					}
-					m.loading = false
-				}
-
-				absKeyPath, _ := filepath.Abs(keyPath)
-				m.eb = &config.EnableBankingConfig{
-					AppID:          appID,
-					PrivateKeyPath: absKeyPath,
-					Environment:    config.Environment(env),
-					RedirectURL:    redirectVal,
-				}
-				m.cfg = &config.Config{
-					Providers: []config.ProviderConfig{{
-						Name:          "enable-banking",
-						Type:          config.ProviderEnableBanking,
-						EnableBanking: m.eb,
-					}},
-					MCP: config.MCPConfig{
-						AccessMode: config.ReadOnly,
-					},
-				}
-				m.client = enablebanking.NewClient(m.eb.AppID, m.eb.PrivateKeyPath, m.eb.PrivateKeyContent, string(m.eb.Environment))
-
-				m.step = stepBankFetch
-				m.err = nil
-				return m, nil
-			}
+		return m.updateCredentials(msg)
+	case stepInstructions:
+		if k, ok := msg.(tea.KeyMsg); ok && k.String() == "enter" {
+			return m.afterCredentials()
 		}
-
-		switch m.focusedInputIdx {
-		case 0:
-			m.appIDInput, cmd = m.appIDInput.Update(msg)
-		case 1:
-			m.keyPathInput, cmd = m.keyPathInput.Update(msg)
-		case 2:
-			m.redirectURLInput, cmd = m.redirectURLInput.Update(msg)
-		}
-		return m, cmd
-
-	case stepBankFetch:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "up":
-				if m.selectedCountryIdx > 0 {
-					m.selectedCountryIdx--
-				}
-			case "down":
-				if m.selectedCountryIdx < len(countryOptions)-1 {
-					m.selectedCountryIdx++
-				}
-			case "enter":
-				selected := countryOptions[m.selectedCountryIdx]
-				m.loading = true
-				m.statusMsg = "Fetching registered banks from API..."
-				m.err = nil
-				return m, fetchBanksForTUISetup(m.client, selected.Code)
-			}
-		}
-		return m, nil
-
-	case stepBankSelect:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "up":
-				if m.selectedBankIdx > 0 {
-					m.selectedBankIdx--
-				}
-				return m, nil
-			case "down":
-				if m.selectedBankIdx < len(m.filteredBanks)-1 {
-					m.selectedBankIdx++
-				}
-				return m, nil
-			case "enter":
-				if len(m.filteredBanks) > 0 {
-					selected := m.filteredBanks[m.selectedBankIdx]
-					m.bankName = selected.Name
-					m.bankCtry = selected.Country
-
-					m.loading = true
-					m.statusMsg = "Initiating bank authorization redirect link..."
-					m.err = nil
-					return m, startAuthorizationTUISetup(m.client, m.bankName, m.bankCtry, m.eb.RedirectURL)
-				}
-				return m, nil
-			}
-		}
-
-		// Update search input
-		m.bankSearchInput, cmd = m.bankSearchInput.Update(msg)
-
-		// Update filtered list in real-time
-		query := strings.ToLower(m.bankSearchInput.Value())
-		m.filteredBanks = nil
-		for _, bank := range m.banks {
-			if strings.Contains(strings.ToLower(bank.Name), query) || strings.Contains(strings.ToLower(bank.Bic), query) {
-				m.filteredBanks = append(m.filteredBanks, bank)
-			}
-		}
-
-		// Recalculate index bounds
-		if m.selectedBankIdx >= len(m.filteredBanks) {
-			m.selectedBankIdx = len(m.filteredBanks) - 1
-		}
-		if m.selectedBankIdx < 0 {
-			m.selectedBankIdx = 0
-		}
-
-		return m, cmd
-
-	case stepAuthRedirect:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
+	case stepCountry:
+		return m.updateCountry(msg)
+	case stepBank:
+		return m.updateBank(msg)
+	case stepAuth:
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
 			case "o", "enter":
-				if m.authResp != nil {
-					_ = OpenBrowser(m.authResp.URL)
+				if m.authURL != "" {
+					_ = OpenBrowser(m.authURL)
 				}
-				m.step = stepCodeExchange
+				m.step = stepCode
 				m.codeInput.Focus()
-				return m, nil
 			case "space":
-				m.step = stepCodeExchange
+				m.step = stepCode
 				m.codeInput.Focus()
-				return m, nil
 			}
 		}
-
-	case stepCodeExchange:
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "enter":
-				code := strings.TrimSpace(m.codeInput.Value())
-				if code == "" {
-					m.err = fmt.Errorf("authorization code is required")
-					return m, nil
-				}
-				m.loading = true
-				m.statusMsg = "Exchanging authorization code for active session..."
-				m.err = nil
-				return m, exchangeCodeTUISetup(m.client, code)
-			}
-		}
-		m.codeInput, cmd = m.codeInput.Update(msg)
-		return m, cmd
+	case stepCode:
+		return m.updateCode(msg)
 	}
 
+	return m, cmd
+}
+
+func (m *SetupModel) updateType(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "up":
+		if m.typeIdx > 0 {
+			m.typeIdx--
+		}
+	case "down":
+		if m.typeIdx < len(m.types)-1 {
+			m.typeIdx++
+		}
+	case "enter":
+		flow, ok := setupflow.For(m.types[m.typeIdx])
+		if !ok {
+			m.err = fmt.Errorf("no setup flow for %q", m.types[m.typeIdx])
+			return m, nil
+		}
+		m.flow = flow
+		m.nameInput.SetValue(string(m.types[m.typeIdx]))
+		m.nameInput.Focus()
+		m.step = stepName
+	}
 	return m, nil
 }
 
+func (m *SetupModel) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "enter" {
+		name := strings.TrimSpace(m.nameInput.Value())
+		if name == "" {
+			name = string(m.flow.Type())
+		}
+		if existing := m.cfg.Provider(name); existing != nil && existing.Type != m.flow.Type() {
+			m.err = fmt.Errorf("provider %q already exists with type %q", name, existing.Type)
+			return m, nil
+		}
+		m.pc = setup.EnsureProvider(m.cfg, name, m.flow.Type())
+		m.initCredentialFields()
+		if len(m.fields) == 0 {
+			return m.afterCredentials()
+		}
+		m.step = stepCredentials
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+func (m *SetupModel) updateCredentials(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	focused := m.fields[m.fieldFocus]
+	switch k.String() {
+	case "tab", "down":
+		m.focusField((m.fieldFocus + 1) % len(m.fields))
+		return m, nil
+	case "up":
+		m.focusField((m.fieldFocus - 1 + len(m.fields)) % len(m.fields))
+		return m, nil
+	case "left", "right", "space":
+		if focused.Kind == setupflow.FieldChoice && len(focused.Choices) > 0 {
+			m.choiceIdx[m.fieldFocus] = (m.choiceIdx[m.fieldFocus] + 1) % len(focused.Choices)
+			return m, nil
+		}
+	case "enter":
+		if m.fieldFocus < len(m.fields)-1 {
+			m.focusField(m.fieldFocus + 1)
+			return m, nil
+		}
+		return m.submitCredentials()
+	}
+
+	if focused.Kind != setupflow.FieldChoice {
+		var cmd tea.Cmd
+		m.inputs[m.fieldFocus], cmd = m.inputs[m.fieldFocus].Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *SetupModel) submitCredentials() (tea.Model, tea.Cmd) {
+	values := make(map[string]string, len(m.fields))
+	for i, f := range m.fields {
+		var v string
+		if f.Kind == setupflow.FieldChoice {
+			if len(f.Choices) > 0 {
+				v = f.Choices[m.choiceIdx[i]]
+			}
+		} else {
+			v = strings.TrimSpace(m.inputs[i].Value())
+		}
+		if v == "" && !f.Optional {
+			m.err = fmt.Errorf("%s is required", f.Label)
+			return m, nil
+		}
+		values[f.Key] = v
+	}
+	m.values = values
+
+	instr, err := m.flow.ApplyCredentials(m.pc, values)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	m.instructions = instr
+	m.err = nil
+	if instr != "" {
+		m.step = stepInstructions
+		return m, nil
+	}
+	return m.afterCredentials()
+}
+
+func (m *SetupModel) updateCountry(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "up":
+		if m.countryIdx > 0 {
+			m.countryIdx--
+		}
+	case "down":
+		if m.countryIdx < len(countryOptions)-1 {
+			m.countryIdx++
+		}
+	case "enter":
+		m.loading = true
+		m.statusMsg = "Fetching banks..."
+		m.err = nil
+		return m, fetchBanksCmd(m.flow, m.pc, countryOptions[m.countryIdx].Code)
+	}
+	return m, nil
+}
+
+func (m *SetupModel) updateBank(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		switch k.String() {
+		case "up":
+			if m.bankIdx > 0 {
+				m.bankIdx--
+			}
+			return m, nil
+		case "down":
+			if m.bankIdx < len(m.filteredBanks)-1 {
+				m.bankIdx++
+			}
+			return m, nil
+		case "enter":
+			if len(m.filteredBanks) == 0 {
+				return m, nil
+			}
+			m.chosenBank = m.filteredBanks[m.bankIdx]
+			m.loading = true
+			m.statusMsg = "Initiating bank authorization..."
+			m.err = nil
+			return m, startAuthCmd(m.flow, m.pc, m.connectionRequest())
+		}
+	}
+
+	var cmd tea.Cmd
+	m.bankSearchInput, cmd = m.bankSearchInput.Update(msg)
+	query := strings.ToLower(m.bankSearchInput.Value())
+	m.filteredBanks = nil
+	for _, b := range m.banks {
+		if strings.Contains(strings.ToLower(b.Name), query) || strings.Contains(strings.ToLower(b.BIC), query) {
+			m.filteredBanks = append(m.filteredBanks, b)
+		}
+	}
+	if m.bankIdx >= len(m.filteredBanks) {
+		m.bankIdx = len(m.filteredBanks) - 1
+	}
+	if m.bankIdx < 0 {
+		m.bankIdx = 0
+	}
+	return m, cmd
+}
+
+func (m *SetupModel) updateCode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "enter" {
+		if strings.TrimSpace(m.codeInput.Value()) == "" {
+			m.err = fmt.Errorf("authorization code is required")
+			return m, nil
+		}
+		m.loading = true
+		m.statusMsg = "Exchanging authorization code..."
+		m.err = nil
+		return m, completeCmd(m.flow, m.pc, m.connectionRequest())
+	}
+	var cmd tea.Cmd
+	m.codeInput, cmd = m.codeInput.Update(msg)
+	return m, cmd
+}
+
 func (m *SetupModel) View() string {
-	s := ""
-	s += titleStyle.Render("🏦 ENABLE BANKING - INTERACTIVE SETUP WIZARD") + "\n\n"
+	s := titleStyle.Render("🏦 fin-mcp — SETUP WIZARD") + "\n\n"
 
 	if m.err != nil {
 		s += errorStyle.Render(fmt.Sprintf("❌ Error: %v", m.err)) + "\n\n"
 	}
-
 	if m.loading {
-		s += lipgloss.NewStyle().Foreground(accentColor).Render("⌛ "+m.statusMsg) + "\n"
-		return s
+		return s + lipgloss.NewStyle().Foreground(accentColor).Render("⌛ "+m.statusMsg) + "\n"
 	}
 
 	switch m.step {
-	case stepKeypairChoice:
-		s += headerStyle.Render("Welcome! Choose your Application Setup:") + "\n\n"
-
-		choices := []string{
-			"Use an Existing Keypair & App ID\n   (Select this if you already have an application registered on enablebanking.com)",
-			"Generate a New Keypair & Certificate\n   (Select this if you do not have an application yet. We will generate keys for you)",
-		}
-
-		for i, choice := range choices {
-			cursor := "  "
-			style := normalStyle
-			if i == m.keypairChoiceIdx {
-				cursor = "👉 "
-				style = selectedStyle
+	case stepType:
+		s += headerStyle.Render("Choose a provider type:") + "\n\n"
+		for i, t := range m.types {
+			cursor, style := "  ", normalStyle
+			if i == m.typeIdx {
+				cursor, style = "👉 ", selectedStyle
 			}
-			s += style.Render(cursor+choice) + "\n\n"
+			s += style.Render(cursor+string(t)) + "\n"
 		}
-		s += helpStyle.Render("[Up/Down] Navigate  |  [Enter] Select Option  |  [Q] Quit")
+		s += "\n" + helpStyle.Render("[Up/Down] Navigate · [Enter] Select · [Ctrl+C] Quit")
 
-	case stepSummary:
-		s += headerStyle.Render("Setup Steps Summary") + "\n\n"
-
-		if m.keypairChoiceIdx == 0 {
-			s += boxStyle.Render(
-				"We will go through the following steps to configure your bank:\n\n"+
-					"1. Enter existing Application Credentials (App ID & Private Key Path).\n"+
-					"2. Select Country & Choose your Bank (ASPSP).\n"+
-					"3. Secure Redirection: Log in to your bank to authorize the session.\n"+
-					"4. Code Exchange: Retrieve and save authorized bank details.\n\n"+
-					"Ready? Press [Enter] to start!") + "\n\n"
-		} else {
-			s += boxStyle.Render(
-				"We will go through the following steps to generate keys and link your bank:\n\n"+
-					"1. Generate Keypair: We automatically write 'private.key' and 'public.crt'.\n"+
-					"2. Register Application: Upload 'public.crt' to the Enable Banking dashboard.\n"+
-					"3. Enter App ID: Paste the newly assigned App ID assigned by the control panel.\n"+
-					"4. Select Country & Choose your Bank (ASPSP).\n"+
-					"5. Secure Redirection: Log in to your bank to authorize the session.\n"+
-					"6. Code Exchange: Retrieve and save authorized bank details.\n\n"+
-					"Ready? Press [Enter] to generate keys and proceed!") + "\n\n"
-		}
-		s += helpStyle.Render("[Enter] Proceed  |  [Esc] Back  |  [Q] Quit")
+	case stepName:
+		s += headerStyle.Render("Name this provider instance:") + "\n\n"
+		s += m.nameInput.View() + "\n\n"
+		s += helpStyle.Render("[Enter] Continue · [Esc] Back")
 
 	case stepCredentials:
-		if m.keypairChoiceIdx == 1 {
-			// Generate Keypair Flow
-			s += headerStyle.Render("Step 1: Keys Generated & App Registration Required") + "\n\n"
+		s += headerStyle.Render(fmt.Sprintf("Configure %s credentials:", m.flow.Type())) + "\n\n"
+		s += m.renderFields()
+		s += "\n" + helpStyle.Render("[Tab/Arrows] Navigate · [Left/Right/Space] Toggle choice · [Enter] Next/Submit · [Esc] Back")
 
-			redirectVal := strings.TrimSpace(m.redirectURLInput.Value())
-			regURL := fmt.Sprintf("https://enablebanking.com/cp/applications?name=Enable+Banking+Go+MCP&redirect_urls=%s&environment=SANDBOX", strings.ReplaceAll(redirectVal, "/", "%2F"))
+	case stepInstructions:
+		s += headerStyle.Render("Action required") + "\n\n"
+		s += boxStyle.Render(strings.TrimSpace(m.instructions)) + "\n\n"
+		s += helpStyle.Render("[Enter] Continue · [Esc] Back")
 
-			s += boxStyle.Render(
-				"🔑 Secure Private Key written to: private.key\n"+
-					"📜 Public Certificate written to: public.crt\n\n"+
-					"ACTION REQUIRED:\n"+
-					"1. Register a new application at:\n   "+regURL+"\n"+
-					"2. Upload the contents of your generated 'public.crt' file (shown below).\n"+
-					"3. Copy your newly assigned Application ID and paste it below.") + "\n\n"
-
-			certContent := "[Could not read public.crt]"
-			if certBytes, err := os.ReadFile("public.crt"); err == nil {
-				certContent = strings.TrimSpace(string(certBytes))
+	case stepCountry:
+		s += headerStyle.Render("Select the country of your bank:") + "\n\n"
+		for i, c := range countryOptions {
+			cursor, style := "  ", normalStyle
+			if i == m.countryIdx {
+				cursor, style = "👉 ", selectedStyle
 			}
-			s += lipgloss.NewStyle().Foreground(accentColor).Render("📜 public.crt (Copy the block below):") + "\n"
-			s += lipgloss.NewStyle().Foreground(accentColor).Render("--------------------------------------------------------------------------------") + "\n"
-			s += certContent + "\n"
-			s += lipgloss.NewStyle().Foreground(accentColor).Render("--------------------------------------------------------------------------------") + "\n\n"
-
-			s += helpStyle.Render("👉 Press [O] on App ID or Redirect URL field to open the Control Panel in your browser.") + "\n\n"
-
-			// Render App ID Input
-			appIDCursor := "  "
-			if m.focusedInputIdx == 0 {
-				appIDCursor = "👉 "
-			}
-			s += appIDCursor + m.appIDInput.View() + "\n\n"
-
-			// Render Redirect URL Input
-			redirCursor := "  "
-			if m.focusedInputIdx == 2 {
-				redirCursor = "👉 "
-			}
-			s += redirCursor + m.redirectURLInput.View() + "\n\n"
-
-			// Render Environment toggle
-			envCursor := "  "
-			if m.focusedInputIdx == 3 {
-				envCursor = "👉 "
-			}
-			s += envCursor + "Environment: "
-			if m.envSelectedIdx == 0 {
-				s += selectedStyle.Render("[X] SANDBOX") + "   [ ] PRODUCTION"
-			} else {
-				s += "[ ] SANDBOX   " + selectedStyle.Render("[X] PRODUCTION")
-			}
-			s += "\n\n"
-			s += helpStyle.Render("[Tab/Arrows] Navigate  |  [Space/Left/Right] Toggle Env  |  [Enter] Next / Submit  |  [Esc] Back")
-		} else {
-			// Existing Keypair Flow
-			s += headerStyle.Render("Step 1: Enter your credentials") + "\n"
-			s += "Please enter your existing Application credentials registered on enablebanking.com.\n\n"
-
-			// Render App ID Input
-			appIDCursor := "  "
-			if m.focusedInputIdx == 0 {
-				appIDCursor = "👉 "
-			}
-			s += appIDCursor + m.appIDInput.View() + "\n\n"
-
-			// Render Key Path Input
-			keyPathCursor := "  "
-			if m.focusedInputIdx == 1 {
-				keyPathCursor = "👉 "
-			}
-			s += keyPathCursor + m.keyPathInput.View() + "\n\n"
-
-			// Render Redirect URL Input
-			redirCursor := "  "
-			if m.focusedInputIdx == 2 {
-				redirCursor = "👉 "
-			}
-			s += redirCursor + m.redirectURLInput.View() + "\n\n"
-
-			// Render Environment multiple-choice
-			envCursor := "  "
-			if m.focusedInputIdx == 3 {
-				envCursor = "👉 "
-			}
-			s += envCursor + "Environment: "
-			if m.envSelectedIdx == 0 {
-				s += selectedStyle.Render("[X] SANDBOX") + "   [ ] PRODUCTION"
-			} else {
-				s += "[ ] SANDBOX   " + selectedStyle.Render("[X] PRODUCTION")
-			}
-			s += "\n\n"
-			s += helpStyle.Render("[Tab/Arrows] Navigate  |  [Space/Left/Right] Toggle Environment  |  [Enter] Next Step / Submit  |  [Q] Quit")
+			s += style.Render(fmt.Sprintf("%s%s (%s)", cursor, c.Name, c.Code)) + "\n"
 		}
+		s += "\n" + helpStyle.Render("[Up/Down] Navigate · [Enter] Fetch banks · [Esc] Back")
 
-	case stepBankFetch:
-		s += "Step 2: Select the country of your bank\n\n"
+	case stepBank:
+		s += headerStyle.Render("Select your bank:") + "\n\n"
+		s += "🔍 " + m.bankSearchInput.View() + "\n"
+		s += helpStyle.Render(fmt.Sprintf("  (matching %d of %d)", len(m.filteredBanks), len(m.banks))) + "\n\n"
+		s += m.renderBankList()
+		s += "\n" + helpStyle.Render("[Type to search] · [Up/Down] Navigate · [Enter] Select · [Esc] Back")
 
-		for i, country := range countryOptions {
-			cursor := "  "
-			style := normalStyle
-			if i == m.selectedCountryIdx {
-				cursor = "👉 "
-				style = selectedStyle
-			}
-			s += style.Render(fmt.Sprintf("%s%s (%s)", cursor, country.Name, country.Code)) + "\n"
-		}
-		s += "\n"
-		s += helpStyle.Render("[Up/Down] Navigate  |  [Enter] Fetch Banks  |  [Esc] Back  |  [Q] Quit")
+	case stepAuth:
+		s += headerStyle.Render("Authorize at your bank") + "\n\n"
+		s += boxStyle.Render("Open the secure authorization portal, log in, and authorize access.\n\n"+
+			"Direct link:\n"+m.authURL+"\n\n"+
+			"You will be redirected back; the wizard captures the code automatically.") + "\n\n"
+		s += helpStyle.Render("[O/Enter] Open browser · [Space] Continue without opening · [Esc] Back")
 
-	case stepBankSelect:
-		selectedCountry := countryOptions[m.selectedCountryIdx]
-		s += fmt.Sprintf("Step 3: Select your bank for %s (%s)\n\n", selectedCountry.Name, selectedCountry.Code)
-
-		// Render search input
-		s += "🔍 Search: " + m.bankSearchInput.View() + "\n"
-		s += helpStyle.Render(fmt.Sprintf("  (matching %d of %d banks)\n", len(m.filteredBanks), len(m.banks))) + "\n"
-
-		if len(m.filteredBanks) == 0 {
-			s += errorStyle.Render("   No banks match your search query.") + "\n\n"
-		} else {
-			startIdx := 0
-			endIdx := len(m.filteredBanks)
-			maxVisible := 10
-			if len(m.filteredBanks) > maxVisible {
-				startIdx = m.selectedBankIdx - maxVisible/2
-				if startIdx < 0 {
-					startIdx = 0
-				}
-				endIdx = startIdx + maxVisible
-				if endIdx > len(m.filteredBanks) {
-					endIdx = len(m.filteredBanks)
-					startIdx = endIdx - maxVisible
-				}
-			}
-
-			for i := startIdx; i < endIdx; i++ {
-				bank := m.filteredBanks[i]
-				cursor := "  "
-				rowStyle := normalStyle
-				if i == m.selectedBankIdx {
-					cursor = "👉 "
-					rowStyle = selectedStyle
-				}
-				s += rowStyle.Render(fmt.Sprintf("%s%s (BIC: %s)", cursor, bank.Name, bank.Bic)) + "\n"
-			}
-			if len(m.filteredBanks) > maxVisible {
-				s += "\n" + helpStyle.Render(fmt.Sprintf("  ... (showing %d-%d of %d matched banks, use Up/Down to scroll) ...", startIdx+1, endIdx, len(m.filteredBanks))) + "\n"
-			}
-		}
-		s += "\n"
-		s += helpStyle.Render("[Type to Search]  |  [Up/Down] Navigate List  |  [Enter] Select Bank  |  [Esc] Back  |  [Q] Quit")
-
-	case stepAuthRedirect:
-		s += headerStyle.Render("Step 4: Authorize connection at your bank") + "\n\n"
-		s += boxStyle.Render("Press [O] or [Enter] to open your bank's secure authorization portal in your browser.\n\n"+
-			"Direct Link:\n"+m.authResp.URL+"\n\n"+
-			"Instructions:\n"+
-			"1. Log in to your bank and authorize access to balances/transactions.\n"+
-			"2. You will be redirected back. Copy the 'code' parameter from the redirected URL.") + "\n\n"
-		s += helpStyle.Render("[O/Enter] Open Browser & Proceed  |  [Space] Proceed without opening  |  [Esc] Back")
-
-	case stepCodeExchange:
-		s += headerStyle.Render("Step 5: Paste Authorization Code") + "\n"
-		s += "Exchange the redirected bank code for an active authorized session.\n\n"
+	case stepCode:
+		s += headerStyle.Render("Paste the authorization code") + "\n\n"
 		s += m.codeInput.View() + "\n\n"
-		s += helpStyle.Render("[Enter] Complete Setup  |  [Esc] Back  |  [Q] Quit")
+		s += helpStyle.Render("[Enter] Complete · [Esc] Back")
 
 	case stepSuccess:
-		s += headerStyle.Render("🎉 Setup Successfully Completed!") + "\n\n"
-		s += boxStyle.Render(fmt.Sprintf("Your configuration has been written to: %s\n\n"+
-			"The session is now authorized!\n"+
-			"You can close this wizard and run the TUI Dashboard or MCP Server.", m.configPath)) + "\n\n"
-		s += helpStyle.Render("Press [Q] or [Ctrl+C] to Exit.")
+		s += headerStyle.Render("🎉 Setup complete!") + "\n\n"
+		s += boxStyle.Render(fmt.Sprintf("Connection %q saved to %s.\n\nProvider %q is ready.", m.connName, m.configPath, m.pc.Name)) + "\n\n"
+		s += helpStyle.Render("[Ctrl+C] Exit")
 	}
 
 	return s
 }
 
-func (m *SetupModel) startLocalCallbackServer() {
+func (m *SetupModel) renderFields() string {
+	var b strings.Builder
+	for i, f := range m.fields {
+		cursor := "  "
+		if i == m.fieldFocus {
+			cursor = "👉 "
+		}
+		label := f.Label
+		if f.Optional {
+			label += " (optional)"
+		}
+		if f.Kind == setupflow.FieldChoice {
+			b.WriteString(cursor + label + ": ")
+			for j, ch := range f.Choices {
+				if j == m.choiceIdx[i] {
+					b.WriteString(selectedStyle.Render("[" + ch + "]"))
+				} else {
+					b.WriteString(" " + ch + " ")
+				}
+			}
+			b.WriteString("\n\n")
+			continue
+		}
+		b.WriteString(cursor + label + "\n")
+		b.WriteString("  " + m.inputs[i].View() + "\n\n")
+	}
+	return b.String()
+}
+
+func (m *SetupModel) renderBankList() string {
+	if len(m.filteredBanks) == 0 {
+		return errorStyle.Render("   No banks match your search.") + "\n"
+	}
+	start, end, maxVisible := 0, len(m.filteredBanks), 10
+	if len(m.filteredBanks) > maxVisible {
+		start = m.bankIdx - maxVisible/2
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxVisible
+		if end > len(m.filteredBanks) {
+			end = len(m.filteredBanks)
+			start = end - maxVisible
+		}
+	}
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		bank := m.filteredBanks[i]
+		cursor, style := "  ", normalStyle
+		if i == m.bankIdx {
+			cursor, style = "👉 ", selectedStyle
+		}
+		b.WriteString(style.Render(fmt.Sprintf("%s%s (BIC: %s)", cursor, bank.Name, bank.BIC)) + "\n")
+	}
+	return b.String()
+}
+
+// startCallbackServer listens on the redirect URL to capture the SCA code.
+func (m *SetupModel) startCallbackServer() {
 	m.serverChan = make(chan string, 1)
 
-	u, err := url.Parse(m.eb.RedirectURL)
-	if err != nil {
-		return
-	}
-
-	port := "8080"
-	if strings.Contains(u.Host, ":") {
-		port = strings.Split(u.Host, ":")[1]
-	}
-
-	path := u.Path
-	if path == "" {
-		path = "/callback"
+	redirect := m.values["redirect_url"]
+	port, path := "8080", "/callback"
+	if u, err := url.Parse(redirect); err == nil {
+		if strings.Contains(u.Host, ":") {
+			port = strings.Split(u.Host, ":")[1]
+		}
+		if u.Path != "" {
+			path = u.Path
+		}
 	}
 
 	mux := http.NewServeMux()
-	m.localServer = &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
-	}
+	m.localServer = &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		errParam := r.URL.Query().Get("error")
-
-		if errParam != "" {
+		if errParam := r.URL.Query().Get("error"); errParam != "" {
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = fmt.Fprintf(w, `
-				<html>
-				<body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background-color: #1e1e2e; color: #f38ba8;">
-					<h2>❌ Bank Authorization Failed</h2>
-					<p>The bank returned an error: <b>%s</b></p>
-					<p>Please return to your terminal and try again.</p>
-				</body>
-				</html>
-			`, errParam)
+			_, _ = fmt.Fprintf(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:50px;background:#1e1e2e;color:#f38ba8"><h2>❌ Authorization failed</h2><p>%s</p><p>Return to your terminal.</p></body></html>`, errParam)
 			m.serverChan <- "error:" + errParam
 			return
 		}
-
-		if code != "" {
+		if code := r.URL.Query().Get("code"); code != "" {
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = fmt.Fprintf(w, `
-				<html>
-				<body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background-color: #1e1e2e; color: #a6e3a1;">
-					<h2>✅ Authorization Successful!</h2>
-					<p>The bank authorization code was captured successfully.</p>
-					<p>You can close this browser tab and return to your terminal.</p>
-				</body>
-				</html>
-			`)
+			_, _ = fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:50px;background:#1e1e2e;color:#a6e3a1"><h2>✅ Authorized!</h2><p>You can close this tab and return to your terminal.</p></body></html>`)
 			m.serverChan <- code
-		} else {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprint(w, "Missing 'code' query parameter.")
+			return
 		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, "Missing 'code' query parameter.")
 	})
 
+	go func() { _ = m.localServer.ListenAndServe() }()
 	go func() {
-		_ = m.localServer.ListenAndServe()
-	}()
-
-	// Clean shutdown goroutine
-	go func() {
-		<-m.serverChan // Wait until code is sent
+		<-m.serverChan
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = m.localServer.Shutdown(ctx)
 	}()
 }
 
+// RunTUISetup launches the interactive provider-agnostic setup wizard.
 func RunTUISetup(configPath string) error {
-	m := NewSetupModel(configPath)
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(NewSetupModel(configPath))
 	_, err := p.Run()
 	return err
-}
-
-func connSlug(bank string) string {
-	s := strings.ToLower(strings.TrimSpace(bank))
-	s = strings.ReplaceAll(s, " ", "-")
-	if s == "" {
-		s = "connection"
-	}
-	return s
 }

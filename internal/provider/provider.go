@@ -91,7 +91,7 @@ func FromConfig(cfg *config.Config, configPath string) (*Registry, error) {
 		}
 		switch pc.Type {
 		case config.ProviderEnableBanking:
-			eb, err := ebadapter.New(name, pc.EnableBanking, persist)
+			eb, err := ebadapter.New(name, pc, persist)
 			if err != nil {
 				return nil, fmt.Errorf("init provider %q: %w", name, err)
 			}

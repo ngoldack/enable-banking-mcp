@@ -10,8 +10,10 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/mattn/go-isatty"
 
+	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/mcp"
 	"github.com/ngoldack/fin-mcp/internal/setup"
+	"github.com/ngoldack/fin-mcp/internal/setupflow"
 	"github.com/ngoldack/fin-mcp/internal/tui"
 )
 
@@ -23,9 +25,13 @@ type CLI struct {
 	TUI    TUICmd    `cmd:"" name:"tui" help:"Start the interactive Terminal UI banking dashboard."`
 }
 
-// SetupCmd configures credentials and authorizes the bank connection.
+// SetupCmd configures credentials and authorizes the bank connection. It is
+// provider-agnostic: --type selects the provider and the rest of the flags feed
+// that provider's setup flow.
 type SetupCmd struct {
 	Config      string `help:"Path to save the configuration file." default:"config.json" type:"path" short:"c"`
+	Type        string `help:"Provider type." enum:"enable-banking,mock" default:"enable-banking"`
+	Provider    string `help:"Provider instance name (defaults to the type)."`
 	AppID       string `help:"Enable Banking Application ID (UUID)."`
 	PrivateKey  string `help:"Path to the RSA private key PEM file." type:"path" placeholder:"private.key"`
 	Environment string `help:"API environment." default:"SANDBOX" enum:"SANDBOX,PRODUCTION"`
@@ -44,12 +50,24 @@ func (c *SetupCmd) Run() error {
 		return fmt.Errorf("setup must run in an interactive terminal (TTY)")
 	}
 
-	// Any identifying flag triggers non-interactive (flag-driven) setup.
-	if c.AppID != "" || c.Code != "" {
-		return setup.RunFlagSetup(
-			c.Config, c.AppID, c.PrivateKey, c.Environment,
-			c.RedirectURL, c.Country, c.Bank, c.Code, c.Days, c.Keychain,
-		)
+	// Any identifying flag (or a non-default provider type) triggers flag-driven setup.
+	flagDriven := c.AppID != "" || c.Code != "" || config.ProviderType(c.Type) != config.ProviderEnableBanking
+	if flagDriven {
+		creds := map[string]string{
+			"app_id":       c.AppID,
+			"private_key":  c.PrivateKey,
+			"environment":  c.Environment,
+			"redirect_url": c.RedirectURL,
+		}
+		if c.Keychain {
+			creds["keychain"] = "yes"
+		}
+		req := setupflow.ConnectionRequest{
+			Bank: setupflow.Bank{Name: c.Bank, Country: c.Country},
+			Code: c.Code,
+			Days: c.Days,
+		}
+		return setup.RunFlagSetup(c.Config, config.ProviderType(c.Type), c.Provider, creds, req)
 	}
 
 	fmt.Fprintln(os.Stderr, "Launching interactive TUI Setup Wizard...")

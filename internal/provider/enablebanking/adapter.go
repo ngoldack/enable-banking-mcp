@@ -21,16 +21,20 @@ import (
 type Adapter struct {
 	name    string
 	client  eb.APIClient
-	cfg     *config.EnableBankingConfig
-	persist func() // saves the owning application config (e.g. refreshed consent)
+	pc      *config.ProviderConfig // provider instance (credentials + connections)
+	persist func()                 // saves the owning application config (e.g. refreshed consent)
 }
+
+// cfg returns the Enable Banking credentials block.
+func (a *Adapter) cfg() *config.EnableBankingConfig { return a.pc.EnableBanking }
 
 // New builds the adapter and its SDK client from a provider config. If
 // PrivateKeyKeyring is set, the PEM is read from the OS keychain (local only).
-func New(name string, cfg *config.EnableBankingConfig, persist func()) (*Adapter, error) {
-	if cfg == nil {
+func New(name string, pc *config.ProviderConfig, persist func()) (*Adapter, error) {
+	if pc == nil || pc.EnableBanking == nil {
 		return nil, fmt.Errorf("enable-banking provider %q: missing enable_banking config", name)
 	}
+	cfg := pc.EnableBanking
 
 	keyContent := cfg.PrivateKeyContent
 	if cfg.PrivateKeyKeyring != "" {
@@ -54,22 +58,22 @@ func New(name string, cfg *config.EnableBankingConfig, persist func()) (*Adapter
 	}
 
 	client := eb.NewClient(cfg.AppID, cfg.PrivateKeyPath, keyContent, string(cfg.Environment), eb.WithHTTPClient(httpClient))
-	return NewWithClient(name, client, cfg, persist), nil
+	return NewWithClient(name, client, pc, persist), nil
 }
 
 // NewWithClient injects an SDK client (used in tests).
-func NewWithClient(name string, client eb.APIClient, cfg *config.EnableBankingConfig, persist func()) *Adapter {
+func NewWithClient(name string, client eb.APIClient, pc *config.ProviderConfig, persist func()) *Adapter {
 	if persist == nil {
 		persist = func() {}
 	}
-	return &Adapter{name: name, client: client, cfg: cfg, persist: persist}
+	return &Adapter{name: name, client: client, pc: pc, persist: persist}
 }
 
 func (a *Adapter) Name() string { return a.name }
 
 func (a *Adapter) Info() bank.ProviderInfo {
-	conns := make([]bank.ConnectionInfo, 0, len(a.cfg.Connections))
-	for _, c := range a.cfg.Connections {
+	conns := make([]bank.ConnectionInfo, 0, len(a.pc.Connections))
+	for _, c := range a.pc.Connections {
 		conns = append(conns, bank.ConnectionInfo{
 			Name:              c.Name,
 			Bank:              c.Bank,
@@ -79,7 +83,7 @@ func (a *Adapter) Info() bank.ProviderInfo {
 	}
 	return bank.ProviderInfo{
 		Name:        a.name,
-		Environment: string(a.cfg.Environment),
+		Environment: string(a.cfg().Environment),
 		Connections: conns,
 	}
 }
@@ -88,7 +92,7 @@ func (a *Adapter) Info() bank.ProviderInfo {
 // timestamps. It reports an aggregate status (authorized if at least one
 // connection is authorized).
 func (a *Adapter) VerifyConnection(ctx context.Context) (bank.ConnectionStatus, error) {
-	if len(a.cfg.Connections) == 0 {
+	if len(a.pc.Connections) == 0 {
 		return bank.ConnectionStatus{}, fmt.Errorf("no connections configured; run setup to link a bank")
 	}
 
@@ -97,8 +101,8 @@ func (a *Adapter) VerifyConnection(ctx context.Context) (bank.ConnectionStatus, 
 	var lastErr error
 	changed := false
 
-	for i := range a.cfg.Connections {
-		c := &a.cfg.Connections[i]
+	for i := range a.pc.Connections {
+		c := &a.pc.Connections[i]
 		sess, err := a.client.GetSession(ctx, c.SessionID)
 		if err != nil {
 			lastErr = fmt.Errorf("connection %q: %w", c.Name, err)
@@ -124,7 +128,7 @@ func (a *Adapter) VerifyConnection(ctx context.Context) (bank.ConnectionStatus, 
 
 	status := bank.ConnectionStatus{
 		Authorized:        authorized > 0,
-		Status:            fmt.Sprintf("%d/%d connections authorized", authorized, len(a.cfg.Connections)),
+		Status:            fmt.Sprintf("%d/%d connections authorized", authorized, len(a.pc.Connections)),
 		ConsentValidUntil: earliest,
 	}
 	if authorized == 0 {
@@ -139,13 +143,13 @@ func (a *Adapter) VerifyConnection(ctx context.Context) (bank.ConnectionStatus, 
 // ListAccounts aggregates accounts across all connections; each account is
 // tagged with the connection it came from.
 func (a *Adapter) ListAccounts(ctx context.Context) ([]bank.Account, error) {
-	if len(a.cfg.Connections) == 0 {
+	if len(a.pc.Connections) == 0 {
 		return nil, fmt.Errorf("no connections configured; run setup to link a bank")
 	}
 
 	var accounts []bank.Account
 	var lastErr error
-	for _, c := range a.cfg.Connections {
+	for _, c := range a.pc.Connections {
 		sess, err := a.client.GetSession(ctx, c.SessionID)
 		if err != nil {
 			lastErr = fmt.Errorf("connection %q: %w", c.Name, err)
@@ -164,7 +168,7 @@ func (a *Adapter) ListAccounts(ctx context.Context) ([]bank.Account, error) {
 		if lastErr != nil {
 			return nil, lastErr
 		}
-		return nil, fmt.Errorf("no accounts accessible across %d connection(s)", len(a.cfg.Connections))
+		return nil, fmt.Errorf("no accounts accessible across %d connection(s)", len(a.pc.Connections))
 	}
 	return accounts, nil
 }
@@ -190,7 +194,7 @@ func (a *Adapter) InitiateTransfer(ctx context.Context, req bank.TransferRequest
 	state := fmt.Sprintf("pay-%d", time.Now().UnixNano())
 	resp, err := a.client.CreatePayment(
 		ctx, req.DebtorIBAN, req.CreditorIBAN, req.CreditorName,
-		req.Amount, string(req.Currency), req.PaymentType, state, a.cfg.RedirectURL,
+		req.Amount, string(req.Currency), req.PaymentType, state, a.cfg().RedirectURL,
 	)
 	if err != nil {
 		return nil, err

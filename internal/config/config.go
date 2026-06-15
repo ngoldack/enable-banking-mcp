@@ -64,35 +64,32 @@ const (
 	ProviderMock          ProviderType = "mock"
 )
 
-// Connection is one authorized bank link (an Enable Banking session) that
-// exposes one or more accounts. A provider may hold several connections — e.g.
-// one for C24 and one for Revolut, each with its own sub-accounts.
+// Connection is one authorized bank link that exposes one or more accounts. It
+// is provider-agnostic and lives on ProviderConfig: a provider may hold several
+// connections (e.g. one for C24 and one for Revolut). SessionID is an opaque
+// session/consent handle owned by the provider; Metadata carries any
+// provider-specific extras the setup flow needs to persist.
 type Connection struct {
-	Name              string      `json:"name"`
-	Bank              string      `json:"bank"`
-	Country           CountryCode `json:"country"`
-	SessionID         string      `json:"session_id"`
-	ConsentValidUntil time.Time   `json:"consent_valid_until,omitempty"`
+	Name              string            `json:"name"`
+	Bank              string            `json:"bank"`
+	Country           CountryCode       `json:"country"`
+	SessionID         string            `json:"session_id,omitempty"`
+	ConsentValidUntil time.Time         `json:"consent_valid_until,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
 type EnableBankingConfig struct {
-	AppID             string       `json:"app_id"`
-	PrivateKeyPath    string       `json:"private_key_path,omitempty"`
-	PrivateKeyContent string       `json:"private_key_content,omitempty"`
-	PrivateKeyKeyring string       `json:"private_key_keyring,omitempty"` // OS keychain account (local only)
-	Environment       Environment  `json:"environment"`
-	RedirectURL       string       `json:"redirect_url"`
-	Connections       []Connection `json:"connections,omitempty"`
-}
+	AppID             string      `json:"app_id"`
+	PrivateKeyPath    string      `json:"private_key_path,omitempty"`
+	PrivateKeyContent string      `json:"private_key_content,omitempty"`
+	PrivateKeyKeyring string      `json:"private_key_keyring,omitempty"` // OS keychain account (local only)
+	Environment       Environment `json:"environment"`
+	RedirectURL       string      `json:"redirect_url"`
 
-// Connection returns a pointer to the named connection, or nil.
-func (e *EnableBankingConfig) Connection(name string) *Connection {
-	for i := range e.Connections {
-		if e.Connections[i].Name == name {
-			return &e.Connections[i]
-		}
-	}
-	return nil
+	// Deprecated: connections moved to ProviderConfig.Connections. Retained only
+	// so legacy config files still load; migrateLegacyConnections hoists and
+	// clears these on load.
+	LegacyConnections []Connection `json:"connections,omitempty"`
 }
 
 // MockProviderConfig configures the in-memory mock provider (testing/demo).
@@ -101,12 +98,24 @@ type MockProviderConfig struct {
 }
 
 // ProviderConfig is one typed, named provider instance. Exactly one typed
-// sub-config must be set, matching Type.
+// sub-config must be set, matching Type. Connections are provider-agnostic and
+// held here (not in the typed sub-config).
 type ProviderConfig struct {
 	Name          string               `json:"name"`
 	Type          ProviderType         `json:"type"`
 	EnableBanking *EnableBankingConfig `json:"enable_banking,omitempty"`
 	Mock          *MockProviderConfig  `json:"mock,omitempty"`
+	Connections   []Connection         `json:"connections,omitempty"`
+}
+
+// Connection returns a pointer to the named connection, or nil.
+func (p *ProviderConfig) Connection(name string) *Connection {
+	for i := range p.Connections {
+		if p.Connections[i].Name == name {
+			return &p.Connections[i]
+		}
+	}
+	return nil
 }
 
 type MCPConfig struct {
@@ -163,11 +172,29 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	cfg.migrateLegacyConnections()
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 	return &cfg, nil
+}
+
+// migrateLegacyConnections hoists connections from the deprecated
+// enable_banking.connections location to the provider-agnostic
+// ProviderConfig.Connections, then clears the legacy field so SaveConfig writes
+// the new schema.
+func (c *Config) migrateLegacyConnections() {
+	for i := range c.Providers {
+		eb := c.Providers[i].EnableBanking
+		if eb == nil || len(eb.LegacyConnections) == 0 {
+			continue
+		}
+		if len(c.Providers[i].Connections) == 0 {
+			c.Providers[i].Connections = eb.LegacyConnections
+		}
+		eb.LegacyConnections = nil
+	}
 }
 
 func envKey(prefix, group string) func(string) string {
@@ -232,6 +259,17 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("provider %q: unknown type %q (valid: enable-banking, mock)", p.Name, p.Type)
 		}
+
+		connNames := make(map[string]bool, len(p.Connections))
+		for j, conn := range p.Connections {
+			if conn.Name == "" {
+				return fmt.Errorf("provider %q: connections[%d] name is required", p.Name, j)
+			}
+			if connNames[conn.Name] {
+				return fmt.Errorf("provider %q: duplicate connection name %q", p.Name, conn.Name)
+			}
+			connNames[conn.Name] = true
+		}
 	}
 
 	switch c.MCP.AccessMode {
@@ -274,16 +312,6 @@ func (e *EnableBankingConfig) validate(provider string) error {
 	case "", EnvSandbox, EnvProduction:
 	default:
 		return fmt.Errorf("provider %q: invalid environment %q (valid: SANDBOX, PRODUCTION)", provider, e.Environment)
-	}
-	connNames := make(map[string]bool, len(e.Connections))
-	for j, conn := range e.Connections {
-		if conn.Name == "" {
-			return fmt.Errorf("provider %q: connections[%d] name is required", provider, j)
-		}
-		if connNames[conn.Name] {
-			return fmt.Errorf("provider %q: duplicate connection name %q", provider, conn.Name)
-		}
-		connNames[conn.Name] = true
 	}
 	return nil
 }

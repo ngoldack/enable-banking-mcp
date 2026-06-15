@@ -46,11 +46,17 @@ func TestLoad_FileAndDefaults(t *testing.T) {
 	if eb.Environment != EnvSandbox { // default applied
 		t.Errorf("environment default = %q", eb.Environment)
 	}
-	if len(eb.Connections) != 1 || eb.Connections[0].Country != "DE" {
-		t.Fatalf("connections = %+v", eb.Connections)
+	// Connections written under the legacy enable_banking.connections location are
+	// migrated to the provider-agnostic ProviderConfig.Connections on load.
+	conns := cfg.Providers[0].Connections
+	if len(conns) != 1 || conns[0].Country != "DE" {
+		t.Fatalf("connections = %+v", conns)
 	}
-	if eb.Connections[0].ConsentValidUntil.Year() != 2026 {
-		t.Errorf("consent time not parsed: %v", eb.Connections[0].ConsentValidUntil)
+	if conns[0].ConsentValidUntil.Year() != 2026 {
+		t.Errorf("consent time not parsed: %v", conns[0].ConsentValidUntil)
+	}
+	if eb.LegacyConnections != nil {
+		t.Errorf("legacy connections should be cleared after migration: %+v", eb.LegacyConnections)
 	}
 	if cfg.MCP.Transport != TransportStdio || cfg.MCP.CacheTTLMinutes != 5 || cfg.MCP.LogFormat != LogFormatText || cfg.MCP.LogLevel != LogInfo {
 		t.Errorf("mcp defaults = %+v", cfg.MCP)
@@ -94,7 +100,7 @@ func TestValidate_Errors(t *testing.T) {
 		"bad app id":        func(c *Config) { c.Providers[0].EnableBanking.AppID = "short" },
 		"bad redirect":      func(c *Config) { c.Providers[0].EnableBanking.RedirectURL = "ftp://x" },
 		"bad environment":   func(c *Config) { c.Providers[0].EnableBanking.Environment = "STAGING" },
-		"dup connection":    func(c *Config) { c.Providers[0].EnableBanking.Connections = []Connection{{Name: "a"}, {Name: "a"}} },
+		"dup connection":    func(c *Config) { c.Providers[0].Connections = []Connection{{Name: "a"}, {Name: "a"}} },
 		"empty provider id": func(c *Config) { c.Providers[0].Name = "" },
 		"bad access mode":   func(c *Config) { c.MCP.AccessMode = "God" },
 		"bad transport":     func(c *Config) { c.MCP.Transport = "pigeon" },
@@ -123,7 +129,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "out.json")
 	cfg := baseConfig()
 	cfg.Providers[0].EnableBanking.RedirectURL = "http://localhost:8080/callback"
-	cfg.Providers[0].EnableBanking.Connections = []Connection{{Name: "c24", Bank: "C24 Bank", Country: "DE", SessionID: "s1"}}
+	cfg.Providers[0].Connections = []Connection{{Name: "c24", Bank: "C24 Bank", Country: "DE", SessionID: "s1"}}
 
 	if err := SaveConfig(p, cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
@@ -132,7 +138,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if len(got.Providers) != 1 || got.Providers[0].EnableBanking.Connections[0].Name != "c24" {
+	if len(got.Providers) != 1 || got.Providers[0].Connections[0].Name != "c24" {
 		t.Errorf("round trip mismatch: %+v", got.Providers)
 	}
 }

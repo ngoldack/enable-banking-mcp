@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/provider"
 	"github.com/ngoldack/fin-mcp/internal/setup"
+	"github.com/ngoldack/fin-mcp/internal/setupflow"
 )
 
 // ConfigCmd groups configuration-file lifecycle commands.
@@ -29,16 +29,13 @@ func loadConfigFile(path string) (*config.Config, error) {
 	return config.LoadConfig(path)
 }
 
-func ebProvider(cfg *config.Config, name string) (*config.ProviderConfig, error) {
+func providerByName(cfg *config.Config, name string) (*config.ProviderConfig, error) {
 	if name == "" {
 		name = "enable-banking"
 	}
 	p := cfg.Provider(name)
 	if p == nil {
 		return nil, fmt.Errorf("provider %q not found", name)
-	}
-	if p.Type != config.ProviderEnableBanking || p.EnableBanking == nil {
-		return nil, fmt.Errorf("provider %q is not an enable-banking provider", name)
 	}
 	return p, nil
 }
@@ -128,11 +125,7 @@ func (c *ProviderListCmd) Run() error {
 		return nil
 	}
 	for _, p := range cfg.Providers {
-		conns := 0
-		if p.EnableBanking != nil {
-			conns = len(p.EnableBanking.Connections)
-		}
-		fmt.Printf("- %s (type=%s, connections=%d)\n", p.Name, p.Type, conns)
+		fmt.Printf("- %s (type=%s, connections=%d)\n", p.Name, p.Type, len(p.Connections))
 	}
 	return nil
 }
@@ -156,30 +149,23 @@ func (c *ProviderAddCmd) Run() error {
 		return fmt.Errorf("provider %q already exists", c.Name)
 	}
 
-	switch config.ProviderType(c.Type) {
-	case config.ProviderMock:
-		cfg.Providers = append(cfg.Providers, config.ProviderConfig{Name: c.Name, Type: config.ProviderMock, Mock: &config.MockProviderConfig{}})
-	case config.ProviderEnableBanking:
-		keyPath := c.PrivateKey
-		if keyPath == "" {
-			keyPath = "private.key"
-		}
-		if _, err := os.Stat(keyPath); err != nil {
-			if err := setup.GenerateRSAKeyAndCertificate(keyPath, "public.crt"); err != nil {
-				return err
-			}
-			fmt.Println("Generated key pair; upload 'public.crt' to the Enable Banking dashboard.")
-		}
-		abs, _ := filepath.Abs(keyPath)
-		cfg.Providers = append(cfg.Providers, config.ProviderConfig{
-			Name: c.Name, Type: config.ProviderEnableBanking,
-			EnableBanking: &config.EnableBankingConfig{
-				AppID: c.AppID, PrivateKeyPath: abs,
-				Environment: config.Environment(c.Environment), RedirectURL: c.RedirectURL,
-			},
-		})
-	default:
-		return fmt.Errorf("unknown provider type %q", c.Type)
+	t := config.ProviderType(c.Type)
+	flow, err := setupflow.MustFor(t)
+	if err != nil {
+		return err
+	}
+	pc := setup.EnsureProvider(cfg, c.Name, t)
+	instructions, err := flow.ApplyCredentials(pc, map[string]string{
+		"app_id":       c.AppID,
+		"private_key":  c.PrivateKey,
+		"environment":  c.Environment,
+		"redirect_url": c.RedirectURL,
+	})
+	if err != nil {
+		return err
+	}
+	if instructions != "" {
+		fmt.Print(instructions)
 	}
 
 	if err := config.SaveConfig(c.Config, cfg); err != nil {
@@ -238,15 +224,15 @@ func (c *ConnectionListCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	p, err := ebProvider(cfg, c.Provider)
+	p, err := providerByName(cfg, c.Provider)
 	if err != nil {
 		return err
 	}
-	if len(p.EnableBanking.Connections) == 0 {
+	if len(p.Connections) == 0 {
 		fmt.Println("No connections.")
 		return nil
 	}
-	for _, conn := range p.EnableBanking.Connections {
+	for _, conn := range p.Connections {
 		fmt.Printf("- %s · %s (%s) · consent %s\n", conn.Name, conn.Bank, conn.Country, conn.ConsentValidUntil.Format(time.RFC3339))
 	}
 	return nil
@@ -267,15 +253,27 @@ func (c *ConnectionAddCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	p, err := ebProvider(cfg, c.Provider)
+	p, err := providerByName(cfg, c.Provider)
+	if err != nil {
+		return err
+	}
+	flow, err := setupflow.MustFor(p.Type)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if c.Code == "" {
-		url, err := setup.StartConnection(ctx, p.EnableBanking, c.Bank, c.Country, c.Days)
+	req := setupflow.ConnectionRequest{
+		Bank: setupflow.Bank{Name: c.Bank, Country: c.Country},
+		Name: c.Name,
+		Code: c.Code,
+		Days: c.Days,
+	}
+
+	// Providers that require SCA: first call returns a redirect URL.
+	if flow.NeedsAuthorization() && c.Code == "" {
+		url, err := flow.StartConnection(ctx, p, req)
 		if err != nil {
 			return err
 		}
@@ -283,11 +281,11 @@ func (c *ConnectionAddCmd) Run() error {
 		return nil
 	}
 
-	conn, err := setup.ExchangeConnection(ctx, p.EnableBanking, c.Code, c.Name, c.Bank, c.Country)
+	conn, err := flow.CompleteConnection(ctx, p, req)
 	if err != nil {
 		return err
 	}
-	setup.UpsertConnection(p.EnableBanking, conn)
+	setupflow.Upsert(p, conn)
 	if err := config.SaveConfig(c.Config, cfg); err != nil {
 		return err
 	}
@@ -306,14 +304,13 @@ func (c *ConnectionRemoveCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	p, err := ebProvider(cfg, c.Provider)
+	p, err := providerByName(cfg, c.Provider)
 	if err != nil {
 		return err
 	}
-	eb := p.EnableBanking
-	out := eb.Connections[:0]
+	out := p.Connections[:0]
 	removed := false
-	for _, conn := range eb.Connections {
+	for _, conn := range p.Connections {
 		if conn.Name == c.Name {
 			removed = true
 			continue
@@ -323,7 +320,7 @@ func (c *ConnectionRemoveCmd) Run() error {
 	if !removed {
 		return fmt.Errorf("connection %q not found", c.Name)
 	}
-	eb.Connections = out
+	p.Connections = out
 	if err := config.SaveConfig(c.Config, cfg); err != nil {
 		return err
 	}
