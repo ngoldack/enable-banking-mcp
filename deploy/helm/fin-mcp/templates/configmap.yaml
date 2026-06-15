@@ -1,0 +1,29 @@
+{{- if not .Values.config.existingConfigMap }}
+{{- $c := .Values.config.mcp -}}
+{{- $mcp := dict
+    "access_mode" $c.accessMode
+    "transport" "sse"
+    "port" (int $c.port)
+    "log_format" $c.logFormat
+    "log_level" $c.logLevel
+    "cache_type" $c.cache.type
+    "cache_ttl_minutes" (int $c.cache.ttlMinutes) -}}
+{{- if eq $c.cache.type "valkey" }}
+{{- $_ := set $mcp "cache_valkey_address" $c.cache.valkey.address }}
+{{- $_ := set $mcp "cache_valkey_db" (int $c.cache.valkey.db) }}
+{{- $_ := set $mcp "cache_valkey_tls" $c.cache.valkey.tls }}
+{{- if $c.cache.valkey.username }}{{- $_ := set $mcp "cache_valkey_username" $c.cache.valkey.username }}{{- end }}
+{{- end }}
+{{/* Secrets (bearer_token, cache_valkey_password) are intentionally NOT rendered
+     here — they are injected as MCP_* env from the Secret. */}}
+{{- $config := dict "providers" .Values.config.providers "mcp" $mcp -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fin-mcp.fullname" . }}
+  labels:
+    {{- include "fin-mcp.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- $config | toPrettyJson | nindent 4 }}
+{{- end }}

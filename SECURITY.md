@@ -12,9 +12,9 @@ acknowledgement within a few days.
 | Asset | Sensitivity | Where it lives |
 |---|---|---|
 | Enable Banking app **private key** (PEM) | Critical | file, inline config, or OS keychain (local); mounted Secret (k8s) |
-| Bank **session IDs / consents** | High | config file (provider `connections[]`) — a k8s Secret in production (whole `config.json`) |
-| MCP **bearer token** (SSE) | High | `config.json` (k8s Secret) or env |
-| Valkey **password** | High | `config.json` (k8s Secret) |
+| Bank **session IDs / consents** | Low-Medium | config file / ConfigMap (`connections[]`) — inert without the private key |
+| MCP **bearer token** (SSE) | High | k8s Secret → `MCP_BEARER_TOKEN` env |
+| Valkey **password** | High | k8s Secret → `MCP_CACHE_VALKEY_PASSWORD` env |
 | Cached accounts/balances/transactions | Medium | process memory, or an external valkey (plaintext — protect with password + TLS) |
 
 Trust boundaries:
@@ -68,10 +68,12 @@ Trust boundaries:
 - The private key is never baked into the image. Sources: file path, inline
   content, **OS keychain** (local only, via `zalando/go-keyring`), or a mounted
   Kubernetes Secret.
-- In Kubernetes the **entire `config.json` is a Secret** (never a ConfigMap),
-  because it carries bank session IDs, the bearer token, and any cache secrets.
-  Supply it out-of-band via `config.existingSecret` so it never passes through
-  Helm values or CI.
+- In Kubernetes, only the genuine secrets are a **Secret**: the private key
+  (mounted file), the bearer token (`MCP_BEARER_TOKEN`), and the valkey password
+  (`MCP_CACHE_VALKEY_PASSWORD`). The rest — provider topology and connections
+  (incl. `session_id`) — is a **ConfigMap**. A session ID is inert without the
+  private key (every Enable Banking request is signed with an RS256 JWT), so it
+  does not need Secret-grade protection.
 - The **valkey cache is external and stores values in plaintext**; it is a
   shared store for already-fetched account data. Protect it with a
   **password** (`cache_valkey_password`) and **TLS** (`cache_valkey_tls`) — the

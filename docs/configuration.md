@@ -2,9 +2,10 @@
 
 `fin-mcp` is configured by a JSON file (default `config.json`) layered with
 `MCP_*` environment-variable overrides. The file is the source of truth (a
-Kubernetes **Secret** in production, since it holds session IDs, the bearer
-token, and any cache secrets); env vars override server settings at runtime
-(12-factor).
+Kubernetes **ConfigMap** in production); the genuine secrets — bearer token,
+valkey password, private key — are injected via env / a mounted file from a
+**Secret** (see [deployment.md](deployment.md#config-vs-secrets)). Env always
+overrides the file (12-factor).
 
 > Manage the file with the `fin-mcp config` / `fin-mcp setup` commands rather
 > than editing by hand — see [setup.md](setup.md).
@@ -122,8 +123,9 @@ account data is stored there, so harden the connection:
 Cache hit/miss counts and operation latency are exported as OpenTelemetry
 metrics (`fin_mcp.cache.requests`, `fin_mcp.cache.operation.duration`).
 
-> Sensitive cache fields (`cache_valkey_password`) belong in a Secret — in
-> Kubernetes the whole `config.json` is a Secret (see [deployment.md](deployment.md)).
+> The valkey **password** is a secret — supply it via `MCP_CACHE_VALKEY_PASSWORD`
+> (a k8s Secret), not the config file/ConfigMap. See
+> [deployment.md](deployment.md#config-vs-secrets) for the config/secret split.
 
 ## Environment overrides
 

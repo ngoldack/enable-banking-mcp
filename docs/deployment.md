@@ -8,7 +8,8 @@ non-root container.
 
 ```bash
 helm install fin-mcp ./deploy/helm/fin-mcp \
-  --set config.existingSecret=fin-mcp-config
+  --set config.existingConfigMap=fin-mcp-config \
+  --set secrets.existingSecret=fin-mcp-secrets
 ```
 
 The chart applies a hardened `securityContext` (non-root uid 10001,
@@ -16,37 +17,56 @@ The chart applies a hardened `securityContext` (non-root uid 10001,
 dropped). The cache is in-memory by default (no volume). See the
 [chart README](../deploy/helm/fin-mcp/README.md) for the full values reference.
 
-## Secrets: the whole config is a Secret
+## Config vs. secrets
 
-`config.json` carries bank **session IDs / consents**, the **bearer token**, and
-any **cache secrets** (Valkey password). It is therefore rendered
-into a Kubernetes **Secret** (never a ConfigMap) and mounted at
-`/etc/fin-mcp/config.json`.
+Non-sensitive config goes in a **ConfigMap**; only the genuinely-secret values go
+in a **Secret**, injected as env or a mounted file. This is the standard
+12-factor split.
 
-| Option | How | Use |
-|---|---|---|
-| **`config.existingSecret`** | A Secret you create out-of-band with a `config.json` key. | **Preferred** — nothing sensitive passes through Helm values, CI logs, or release history. |
-| Chart-rendered | The chart builds `config.json` from `config.*` values into its own Secret. | Dev, or GitOps with sealed-secrets / SOPS. |
-| _(no token)_ | Empty `bearer_token`. | Auth disabled — loopback/dev only; the server logs a startup warning. |
+| Goes in the ConfigMap (`config.json`) | Goes in the Secret |
+|---|---|
+| `providers` topology, `app_id`, `redirect_url`, environment | **private key** (mounted file at `private_key_path`) |
+| `connections` incl. **`session_id`** | **`bearer_token`** → `MCP_BEARER_TOKEN` env |
+| `mcp.*` operational settings (access mode, transport, port, cache type, valkey **address**, logging) | **valkey password** → `MCP_CACHE_VALKEY_PASSWORD` env |
 
-### Preferred: `config.existingSecret`
+> **Why is `session_id` in the ConfigMap?** An Enable Banking session is only
+> usable when each request is signed with the app **private key** (an RS256 JWT).
+> A leaked session ID is inert on its own, so it does not need Secret-grade
+> protection — the private key (which stays in the Secret) is the real
+> credential. If your policy still requires it in a Secret, supply the whole
+> `config.json` via `config.existingConfigMap` pointing at a Secret-backed
+> projection, or keep the connections out of the chart-rendered ConfigMap.
+
+The secrets are injected by env layering: the server reads them from
+`MCP_BEARER_TOKEN` / `MCP_CACHE_VALKEY_PASSWORD`, which override the (omitted)
+fields in the mounted `config.json`. The private key is mounted at
+`private_key_path`.
+
+### Preferred: bring your own ConfigMap + Secret
 
 ```bash
-# Build config.json locally with `fin-mcp config ...`, then:
-kubectl create secret generic fin-mcp-config \
-  --from-file=config.json=./config.json \
-  --from-literal=authorization="Bearer $(jq -r .mcp.bearer_token config.json)"   # for kagent
+# Non-secret config (built with `fin-mcp config ...`, with secret fields blank):
+kubectl create configmap fin-mcp-config --from-file=config.json=./config.json
+
+# Secrets (any subset of these keys):
+kubectl create secret generic fin-mcp-secrets \
+  --from-literal=bearer-token="$(openssl rand -hex 32)" \
+  --from-literal=valkey-password="$VALKEY_PASSWORD" \
+  --from-file=private.key=./private.key \
+  --from-literal=authorization="Bearer $TOKEN"   # for kagent (see below)
 ```
 
 ```yaml
 # values.yaml
 config:
-  existingSecret: fin-mcp-config
+  existingConfigMap: fin-mcp-config
+secrets:
+  existingSecret: fin-mcp-secrets
 ```
 
-Embed the private key inline in `config.json`
-(`enable_banking.private_key_content`) so the whole credential set lives in this
-one Secret. The `authorization` key (`Bearer <token>`) is for kagent.
+Or let the chart render both from `config.*` and `secrets.*` values (dev /
+GitOps with sealed-secrets / SOPS). The `authorization` key (`Bearer <token>`)
+is for kagent.
 
 > **Do I need `redirect_url`?** Only for setup (SCA) and **payment initiation**.
 > A read-only deployment with already-authorized sessions can leave it empty.
@@ -88,13 +108,13 @@ spec:
         - name: Authorization
           valueFrom:
             type: Secret
-            name: fin-mcp-config   # same Secret as the server
+            name: fin-mcp-secrets  # the server's Secret
             key: authorization     # holds "Bearer <token>"
 ```
 
 This is the secure pattern: the token lives **only** in the Kubernetes Secret,
-referenced by both the server (inside the mounted `config.json`) and the agent
-(as the `Authorization` header). Nothing is templated into agent specs or Helm
+referenced by both the server (injected as `MCP_BEARER_TOKEN`) and the agent (as
+the `Authorization` header). Nothing is templated into agent specs or Helm
 values.
 
 > Scope the agent's `toolNames` to the least privilege it needs. Keep the server
@@ -110,8 +130,8 @@ the static-token endpoint directly. See [../SECURITY.md](../SECURITY.md).
 
 ## Caching
 
-The cache is configured under `config.mcp.cache` and rendered into the config
-Secret:
+The cache is configured under `config.mcp.cache` (rendered into the ConfigMap;
+the valkey **password** goes in the Secret as `valkey-password`):
 
 ```yaml
 config:
@@ -121,8 +141,9 @@ config:
       ttlMinutes: 5
       valkey:
         address: valkey.cache.svc:6379  # your external valkey (not deployed by this chart)
-        password: "<password>"
         tls: true
+secrets:
+  valkeyPassword: "<password>"          # -> Secret, injected as MCP_CACHE_VALKEY_PASSWORD
 ```
 
 - **`memory`** (default) is per-process — with `replicaCount > 1` each replica
@@ -130,8 +151,8 @@ config:
   across the TUI and the server).
 - `valkey` is **external only** — run/operate the server yourself; the chart does
   not deploy one. Cached account data is stored there as plaintext, so set a
-  **password** and **TLS**. The server logs a startup warning if either is
-  missing. The password lives in the config Secret.
+  **password** (`secrets.valkeyPassword`) and **TLS**. The server logs a startup
+  warning if either is missing.
 - Cache hit/miss and latency are exported as OpenTelemetry metrics.
 
 ## Observability (OpenTelemetry)

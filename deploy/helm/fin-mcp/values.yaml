@@ -17,29 +17,20 @@ otel:
   exporterEndpoint: "" # e.g. http://otel-collector:4318
   serviceName: fin-mcp
 
-# The ENTIRE config.json is treated as sensitive (it holds bank session IDs, the
-# bearer token, and any cache secrets) and is rendered into a Kubernetes
-# **Secret**, never a ConfigMap.
-#
-#   - PREFERRED (production): set config.existingSecret to a Secret you created
-#     out-of-band, with a `config.json` key (and the private key inline via
-#     `private_key_content`, or a `private.key` key — see deployment docs). The
-#     config then never passes through Helm values, CI logs, or release history.
-#   - Otherwise the chart renders config.json into its own Secret from the values
-#     below (dev / GitOps-with-sealed-secrets).
+# Non-sensitive configuration -> ConfigMap (mounted as config.json). This holds
+# the provider topology and connections. Connection session IDs live here: an
+# Enable Banking session is only usable when requests are signed with the app
+# private key (an RS256 JWT), so a session ID is inert on its own. The actual
+# secrets live under `secrets:` below.
 config:
-  existingSecret: "" # Secret with a `config.json` key (and optional `private.key`)
+  existingConfigMap: "" # ConfigMap with a `config.json` key (skips chart rendering)
 
-  # Provider topology. Connections are added out-of-band (they require SCA) and
-  # belong in the Secret — keep them empty here and patch the Secret, or use
-  # config.existingSecret.
   providers:
     - name: enable-banking
       type: enable-banking
       enable_banking:
         app_id: ""
-        # Use an inline key (private_key_content) for the existingSecret path, or
-        # mount a file at this path via privateKey.content for the chart path.
+        # The private key is mounted from the Secret (see secrets.privateKeyContent).
         private_key_path: /etc/fin-mcp/keys/private.key
         environment: SANDBOX
         # redirect_url is only needed for setup (SCA) and payment initiation.
@@ -52,27 +43,26 @@ config:
     port: 8090
     logFormat: json # text | json
     logLevel: info
-    # Bearer token for SSE auth (sensitive — rendered into the Secret). Empty
-    # disables auth; only safe on loopback. Always run behind TLS.
-    bearerToken: ""
     cache:
       type: memory # none | memory | valkey
       ttlMinutes: 5
       # External Valkey/Redis only — this chart does NOT deploy a Valkey server.
-      # Point address at your own instance. Cached account data is stored there;
-      # use a password and TLS (the server warns at startup if either is missing).
+      # The password is a secret (see secrets.valkeyPassword).
       valkey:
         address: "" # host:port of your external valkey
         username: ""
-        password: "" # sensitive; strongly recommended
         db: 0
         tls: false # set true when your valkey terminates TLS
 
-# Enable Banking application private key (PEM). Rendered into the Secret and
-# mounted at /etc/fin-mcp/keys/private.key. Leave empty when using
-# config.existingSecret with an inline private_key_content.
-privateKey:
-  content: ""
+# Sensitive values -> Secret. Injected as env (bearer token, valkey password) or
+# mounted as a file (private key). Provide them out-of-band via
+# secrets.existingSecret (keys: bearer-token, valkey-password, private.key) so
+# nothing sensitive passes through Helm values, CI logs, or release history.
+secrets:
+  existingSecret: "" # Secret with keys: bearer-token, valkey-password, private.key
+  bearerToken: "" # SSE auth token (empty disables auth; loopback only)
+  valkeyPassword: "" # external valkey password
+  privateKeyContent: "" # Enable Banking private key PEM, mounted at private_key_path
 
 service:
   type: ClusterIP

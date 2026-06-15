@@ -1,3 +1,6 @@
+{{- $secretName := include "fin-mcp.secretName" . -}}
+{{- $hasSecrets := include "fin-mcp.hasSecrets" . -}}
+{{- $hasKey := or .Values.secrets.existingSecret .Values.secrets.privateKeyContent -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,8 +15,11 @@ spec:
   template:
     metadata:
       annotations:
-        {{- if not .Values.config.existingSecret }}
-        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if not .Values.config.existingConfigMap }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if and $hasSecrets (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -30,8 +36,25 @@ spec:
             - name: http
               containerPort: {{ .Values.config.mcp.port }}
           env:
-            # All settings come from the mounted config.json (a Secret). Only
-            # telemetry is wired via env here.
+            # Non-secret settings come from the mounted config.json (ConfigMap).
+            # The secrets are injected here from the Secret, overriding the
+            # (omitted) values in config.json via MCP_* env layering.
+            {{- if or .Values.secrets.existingSecret .Values.secrets.bearerToken }}
+            - name: MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: bearer-token
+                  optional: true
+            {{- end }}
+            {{- if and (eq .Values.config.mcp.cache.type "valkey") (or .Values.secrets.existingSecret .Values.secrets.valkeyPassword) }}
+            - name: MCP_CACHE_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: valkey-password
+                  optional: true
+            {{- end }}
             {{- if .Values.otel.exporterEndpoint }}
             - name: OTEL_SERVICE_NAME
               value: {{ .Values.otel.serviceName | quote }}
@@ -42,6 +65,11 @@ spec:
             - name: config
               mountPath: /etc/fin-mcp
               readOnly: true
+            {{- if $hasKey }}
+            - name: keys
+              mountPath: /etc/fin-mcp/keys
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -52,18 +80,20 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
-        # The whole config (config.json + optional private.key) comes from a
-        # single Secret — chart-rendered or the operator-supplied existingSecret.
+        # Non-secret config (provider topology + connections) from a ConfigMap.
         - name: config
+          configMap:
+            name: {{ .Values.config.existingConfigMap | default (include "fin-mcp.fullname" .) }}
+        {{- if $hasKey }}
+        # Private key mounted from the Secret at the configured private_key_path.
+        - name: keys
           secret:
-            secretName: {{ .Values.config.existingSecret | default (include "fin-mcp.fullname" .) }}
+            secretName: {{ $secretName }}
+            optional: true
             items:
-              - key: config.json
-                path: config.json
-              {{- if and (not .Values.config.existingSecret) .Values.privateKey.content }}
               - key: private.key
-                path: keys/private.key
-              {{- end }}
+                path: private.key
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

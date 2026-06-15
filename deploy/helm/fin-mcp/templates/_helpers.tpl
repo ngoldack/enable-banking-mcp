@@ -17,3 +17,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 app.kubernetes.io/name: {{ include "fin-mcp.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{- define "fin-mcp.secretName" -}}
+{{- .Values.secrets.existingSecret | default (printf "%s-secrets" (include "fin-mcp.fullname" .)) -}}
+{{- end -}}
+
+{{- define "fin-mcp.hasSecrets" -}}
+{{- if or .Values.secrets.existingSecret .Values.secrets.bearerToken .Values.secrets.valkeyPassword .Values.secrets.privateKeyContent -}}true{{- end -}}
+{{- end -}}

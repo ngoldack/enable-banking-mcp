@@ -69,6 +69,9 @@ func TestLoad_EnvOverridesMCP(t *testing.T) {
 	t.Setenv("MCP_TRANSPORT", "sse")
 	t.Setenv("MCP_PORT", "9000")
 	t.Setenv("MCP_CACHE_TTL_MINUTES", "15")
+	// Secret fields are injected via env (omitted from the config file / ConfigMap).
+	t.Setenv("MCP_BEARER_TOKEN", "tok-from-env")
+	t.Setenv("MCP_CACHE_VALKEY_PASSWORD", "pw-from-env")
 
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -76,6 +79,9 @@ func TestLoad_EnvOverridesMCP(t *testing.T) {
 	}
 	if cfg.MCP.AccessMode != Unrestricted || cfg.MCP.Transport != TransportSSE || cfg.MCP.Port != 9000 || cfg.MCP.CacheTTLMinutes != 15 {
 		t.Errorf("env overrides failed: %+v", cfg.MCP)
+	}
+	if cfg.MCP.BearerToken != "tok-from-env" || cfg.MCP.CacheValkeyPassword != "pw-from-env" {
+		t.Errorf("secret env injection failed: token=%q valkeyPw=%q", cfg.MCP.BearerToken, cfg.MCP.CacheValkeyPassword)
 	}
 }
 

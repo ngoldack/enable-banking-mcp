@@ -5,48 +5,48 @@ single, unprivileged, non-root container.
 
 ```bash
 helm install fin-mcp ./deploy/helm/fin-mcp \
-  --set config.existingSecret=fin-mcp-config
+  --set config.existingConfigMap=fin-mcp-config \
+  --set secrets.existingSecret=fin-mcp-secrets
 ```
 
-## Secret model
+## Config vs. secrets
 
-The **entire `config.json` is sensitive** — it contains bank session IDs and
-consents, the SSE bearer token, and any cache secrets (Valkey password). The
-chart therefore renders it into a Kubernetes **Secret**
-(never a ConfigMap) and mounts it at `/etc/fin-mcp/config.json`.
+Non-sensitive configuration is rendered into a **ConfigMap**; only the genuine
+secrets go into a **Secret**, injected as env (bearer token, valkey password) or
+a mounted file (private key). Standard 12-factor split.
 
-Two ways to supply it:
+| ConfigMap (`config.json`) | Secret |
+|---|---|
+| `providers` topology, `app_id`, connections incl. **`session_id`**, `mcp.*` operational settings, valkey **address** | private key (file), **bearer token** (`MCP_BEARER_TOKEN`), **valkey password** (`MCP_CACHE_VALKEY_PASSWORD`) |
 
-| Mode | How | When |
+`session_id` lives in the ConfigMap deliberately: an Enable Banking session is
+only usable when each request is signed with the app **private key** (RS256 JWT),
+so a session ID is inert on its own.
+
+| Supply | ConfigMap | Secret |
 |---|---|---|
-| **`config.existingSecret`** | You create the Secret out-of-band (keys: `config.json`, optional `private.key`). | **Production.** Nothing sensitive passes through Helm values, CI logs, or release history. |
-| Chart-rendered | The chart builds `config.json` from `config.*` values into its own Secret. | Dev, or GitOps with sealed-secrets / SOPS. |
-
-### Production: `config.existingSecret`
+| **Out-of-band (preferred)** | `config.existingConfigMap` | `secrets.existingSecret` |
+| Chart-rendered | `config.providers` / `config.mcp.*` | `secrets.bearerToken` / `secrets.valkeyPassword` / `secrets.privateKeyContent` |
 
 ```bash
-# Build config.json locally (e.g. via `fin-mcp config ...`), then:
-kubectl create secret generic fin-mcp-config \
-  --from-file=config.json=./config.json \
-  --from-literal=authorization="Bearer $(jq -r .mcp.bearer_token config.json)"   # for kagent
-```
+# Non-secret config (secret fields left blank in config.json):
+kubectl create configmap fin-mcp-config --from-file=config.json=./config.json
 
-```yaml
-# values.yaml
-config:
-  existingSecret: fin-mcp-config
+# Secrets (any subset of these keys; all are optional):
+kubectl create secret generic fin-mcp-secrets \
+  --from-literal=bearer-token="$(openssl rand -hex 32)" \
+  --from-literal=valkey-password="$VALKEY_PASSWORD" \
+  --from-file=private.key=./private.key \
+  --from-literal=authorization="Bearer $TOKEN"   # for kagent
 ```
-
-Put the Enable Banking private key inline in `config.json`
-(`enable_banking.private_key_content`) so the whole credential set lives in this
-one Secret.
 
 > **Run behind TLS.** Terminate TLS at your ingress / mesh. The bearer token is
 > header-only and compared in constant time, but must never traverse plaintext.
 
 ## Cache backends
 
-Configured under `config.mcp.cache` (rendered into `config.json`):
+Configured under `config.mcp.cache` (the valkey **password** is a secret —
+`secrets.valkeyPassword`):
 
 ```yaml
 config:
@@ -57,9 +57,10 @@ config:
       valkey:
         address: valkey.cache.svc:6379  # external server (NOT deployed by this chart)
         username: ""
-        password: ""        # sensitive; strongly recommended
         db: 0
         tls: true
+secrets:
+  valkeyPassword: ""        # strongly recommended
 ```
 
 - **`none`** — caching disabled.
@@ -73,7 +74,7 @@ config:
 ## kagent integration
 
 A kagent `Agent` injects the bearer token from a Secret via `headersFrom`. Reuse
-the same `config.existingSecret` (add an `authorization` key holding
+the server's `secrets.existingSecret` (add an `authorization` key holding
 `Bearer <token>`):
 
 ```yaml
@@ -96,7 +97,7 @@ spec:
         toolNames: [list-accounts, get-balances, list-transactions]
       headersFrom:
         - name: Authorization
-          valueFrom: { type: Secret, name: fin-mcp-config, key: authorization }
+          valueFrom: { type: Secret, name: fin-mcp-secrets, key: authorization }
 ```
 
 See [../../../docs/deployment.md](../../../docs/deployment.md) for the full
@@ -109,13 +110,15 @@ walkthrough and the OAuth-via-gateway option.
 | `replicaCount` | `1` | Replicas. Use `1` with the `memory` cache. |
 | `image.repository` | `ghcr.io/ngoldack/fin-mcp` | Image. |
 | `image.tag` | `latest` | Tag. |
-| `config.existingSecret` | `""` | Secret with `config.json` (+ optional `private.key`). Preferred. |
+| `config.existingConfigMap` | `""` | ConfigMap with a `config.json` key. Preferred. |
 | `config.providers` | EB stub | Provider topology (chart-rendered path). |
 | `config.mcp.accessMode` | `ReadOnly` | `ReadOnly` \| `InternalOnly` \| `Unrestricted`. |
 | `config.mcp.port` | `8090` | SSE port. |
-| `config.mcp.bearerToken` | `""` | SSE token (rendered into the Secret). |
 | `config.mcp.cache.*` | memory | Cache backend config (above). |
-| `privateKey.content` | `""` | PEM mounted at `/etc/fin-mcp/keys/private.key` (chart path). |
+| `secrets.existingSecret` | `""` | Secret with keys `bearer-token`, `valkey-password`, `private.key`. Preferred. |
+| `secrets.bearerToken` | `""` | SSE token → Secret → `MCP_BEARER_TOKEN`. |
+| `secrets.valkeyPassword` | `""` | Valkey password → Secret → `MCP_CACHE_VALKEY_PASSWORD`. |
+| `secrets.privateKeyContent` | `""` | PEM → Secret, mounted at `/etc/fin-mcp/keys/private.key`. |
 | `otel.exporterEndpoint` | `""` | OTLP/HTTP collector; enables in-process telemetry. |
 | `service.type` / `service.port` | `ClusterIP` / `8090` | Service. |
 | `resources`, `nodeSelector`, `tolerations`, `affinity` | `{}`/`[]` | Standard scheduling. |

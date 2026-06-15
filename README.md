@@ -133,18 +133,18 @@ The private key can be stored in the OS keychain for local runs
 mount it as a Secret file (`private_key_path`) or inline (`private_key_content`).
 
 ### ⛵ Kubernetes
-In production the **whole `config.json` is a Secret** (it carries bank session
-IDs, the bearer token, and the valkey password). Supply it via
-`config.existingSecret`. Operational MCP settings stay env-overridable:
+Non-secret config (provider topology + connections) goes in a **ConfigMap**; only
+the genuine secrets go in a **Secret**, injected as env or a mounted file:
 
-- `MCP_ACCESS_MODE` (`ReadOnly`, `InternalOnly`, `Unrestricted`)
-- `MCP_TRANSPORT` (`stdio` or `sse`)
-- `MCP_PORT` (e.g. `8090`)
-- `MCP_BEARER_TOKEN` (authorizes incoming HTTP/SSE requests)
-- `MCP_CACHE_TYPE` (`none`/`memory`/`valkey`), `MCP_CACHE_TTL_MINUTES`, `MCP_LOG_FORMAT`, `MCP_LOG_LEVEL`
+- **ConfigMap** (`config.existingConfigMap`): `providers`, `connections` (incl. `session_id` — inert without the private key), and all operational `mcp.*` settings.
+- **Secret** (`secrets.existingSecret`): the private key (mounted file), `bearer-token` → `MCP_BEARER_TOKEN`, `valkey-password` → `MCP_CACHE_VALKEY_PASSWORD`.
 
-See **[docs/deployment.md](docs/deployment.md)** for the Helm chart, the
-`config.existingSecret` model, and **kagent** integration.
+Operational MCP settings are also env-overridable: `MCP_ACCESS_MODE`,
+`MCP_TRANSPORT`, `MCP_PORT`, `MCP_CACHE_TYPE`, `MCP_CACHE_TTL_MINUTES`,
+`MCP_LOG_FORMAT`, `MCP_LOG_LEVEL`.
+
+See **[docs/deployment.md](docs/deployment.md)** for the config/secret split, the
+chart, and **kagent** integration.
 
 ---
 
@@ -197,19 +197,23 @@ to enable it; leave it unset and the SDK installs nothing (zero overhead).
 Deploy the SSE server with the Helm chart:
 
 ```bash
-# Build config.json (with `fin-mcp config ...`), put it in a Secret, then:
-kubectl create secret generic fin-mcp-config --from-file=config.json=./config.json
+# Non-secret config -> ConfigMap; the genuine secrets -> Secret:
+kubectl create configmap fin-mcp-config --from-file=config.json=./config.json
+kubectl create secret generic fin-mcp-secrets \
+  --from-literal=bearer-token="$(openssl rand -hex 32)" \
+  --from-file=private.key=./private.key
 helm install fin-mcp ./deploy/helm/fin-mcp \
-  --set config.existingSecret=fin-mcp-config \
+  --set config.existingConfigMap=fin-mcp-config \
+  --set secrets.existingSecret=fin-mcp-secrets \
   --set otel.exporterEndpoint="http://otel-collector:4318"   # optional
 ```
 
-The chart renders the **whole `config.json` into a Secret** (never a ConfigMap,
-since it holds session IDs, the bearer token, and any valkey password), mounts it
-read-only, and applies a hardened `securityContext` (non-root, read-only rootfs,
-dropped capabilities). The default `memory` cache needs no volume. Setting
-`otel.exporterEndpoint` injects the OTLP env vars to enable telemetry. See the
-**[chart README](deploy/helm/fin-mcp/README.md)**.
+The chart puts non-secret config (providers + connections + operational `mcp.*`)
+in a **ConfigMap** and only the real secrets (private key, bearer token, valkey
+password) in a **Secret** — the latter two injected as `MCP_*` env. It mounts
+everything read-only and applies a hardened `securityContext` (non-root,
+read-only rootfs, dropped capabilities). The default `memory` cache needs no
+volume. See the **[chart README](deploy/helm/fin-mcp/README.md)**.
 
 See **[SECURITY.md](SECURITY.md)** for the threat model, controls, and image
 verification with Cosign.
