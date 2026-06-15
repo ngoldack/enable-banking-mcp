@@ -12,8 +12,8 @@ acknowledgement within a few days.
 | Asset | Sensitivity | Where it lives |
 |---|---|---|
 | Enable Banking app **private key** (PEM) | Critical | file, inline config, or OS keychain (local); mounted Secret (k8s) |
-| Bank **session IDs / consents** | High | config file (`connections[]`) |
-| MCP **bearer token** (SSE) | High | env / k8s Secret |
+| Bank **session IDs / consents** | High | config file (provider `connections[]`) |
+| MCP **bearer token** (SSE) | High | env / k8s Secret (chart-managed or `existingSecret`) |
 | Cached accounts/balances/transactions | Medium | BadgerDB at `cache_path` |
 
 Trust boundaries:
@@ -37,10 +37,31 @@ Trust boundaries:
 - Transfer inputs are validated (IBAN length/charset, positive decimal amount).
 
 **Transport / network (SSE)**
-- Optional **bearer-token** middleware guards every SSE GET and POST.
+- A static **bearer token** guards every SSE request. Hardened per the MCP
+  authorization spec:
+  - The token is accepted **only** in the `Authorization: Bearer <token>` header.
+    The URL query-string token (`?token=`) is rejected — it leaks via proxy
+    access logs, the `Referer` header, and browser history.
+  - The token is compared in **constant time** (`crypto/subtle`) to avoid a
+    timing side-channel.
+  - A `401` response carries a `WWW-Authenticate: Bearer` header.
+  - Starting SSE without a token logs a startup warning; do not do this off
+    loopback.
 - The SDK's SSE handler enforces **DNS-rebinding protection** by default.
-- Run behind TLS (ingress / service mesh); the bearer token must never traverse
-  plaintext HTTP.
+- **Run behind TLS** (ingress / service mesh). The bearer token must never
+  traverse plaintext HTTP. `stdio` needs no token (the parent process is the
+  trust boundary; credentials come from the environment).
+
+**Authentication model & roadmap**
+- The built-in mechanism is a **static shared bearer token** — appropriate for
+  cluster-internal use and for kagent (which injects the token from a Kubernetes
+  Secret via `RemoteMCPServer` + `headersFrom`). It is **not** a full OAuth 2.1
+  resource server: no per-token audience binding, expiry, or rotation.
+- For multi-tenant or public exposure requiring the full MCP OAuth 2.1 flow
+  (RFC 9728 protected-resource metadata, RFC 8707 audience-bound tokens), **front
+  the server with a gateway** that terminates OAuth — e.g. agentgateway, Envoy,
+  or `oauth2-proxy` — rather than exposing the static-token endpoint directly.
+  This is the idiomatic Kubernetes pattern and keeps the server itself simple.
 
 **Secrets**
 - The private key is never baked into the image. Sources: file path, inline

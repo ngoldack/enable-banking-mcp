@@ -17,7 +17,7 @@ A high-performance, modular, and enterprise-ready Go workspace implementing an O
 - **Kubernetes-Ready Configuration**: Advanced config loader (`internal/config`) merging `config.json` with dynamic **Environment Variable Overrides** and automated schema/UUID validation.
 - **Enterprise-Grade MCP Server**:
   - **Dual Transport Modes**: Run over `stdio` or as a remote HTTP service using `sse` (Server-Sent Events).
-  - **Token-Based Security**: Complete authorization middleware protecting SSE GET connections and POST requests.
+  - **Hardened bearer-token auth (SSE)**: a static bearer token guards every SSE request, accepted **only** in the `Authorization` header (never the URL query string), compared in constant time, with a `WWW-Authenticate` challenge on `401`. Run behind TLS. For full OAuth 2.1, front with a gateway — see [docs/deployment.md](docs/deployment.md).
   - **Access Control Modes**: Keep your funds secure with granular write levels: `ReadOnly`, `InternalOnly` (restricted to transfers between your own linked accounts), or `Unrestricted`. Payment initiation lives **only** in the MCP server (gated by these modes), keeping the TUI read-only.
 
 ---
@@ -25,7 +25,7 @@ A high-performance, modular, and enterprise-ready Go workspace implementing an O
 ## 🛠️ Quick Start
 
 ### 1. Requirements
-- **Go 1.25+**
+- **Go 1.26+**
 - An active account on the [Enable Banking Developer Dashboard](https://enablebanking.com) to obtain your **Application ID**.
 
 ### 2. Interactive Setup
@@ -45,6 +45,17 @@ Start the Model Context Protocol server to connect your bank accounts to any AI 
 ```bash
 go run ./cmd/fin-mcp server --config config.json
 ```
+
+---
+
+## 📚 Documentation
+
+Full guides live in **[`docs/`](docs/)**:
+
+- **[Configuration](docs/configuration.md)** — config schema, env overrides, transports, access modes.
+- **[Setup & Providers](docs/setup.md)** — provider-agnostic setup (wizard, flags, `config` commands) and adding a provider.
+- **[Deployment](docs/deployment.md)** — Helm, `existingSecret`, **kagent** integration, OpenTelemetry.
+- **[Security](SECURITY.md)** — threat model, auth model & roadmap, supply chain.
 
 ---
 
@@ -83,12 +94,12 @@ authorized bank link (an Enable Banking session) exposing one or more accounts
         "private_key_path": "private.key",
         "private_key_keyring": "",
         "environment": "SANDBOX",
-        "redirect_url": "http://localhost:8080/callback",
-        "connections": [
-          { "name": "c24", "bank": "C24 Bank", "country": "DE", "session_id": "...", "consent_valid_until": "2026-09-14T15:00:00Z" },
-          { "name": "revolut", "bank": "Revolut", "country": "LT", "session_id": "...", "consent_valid_until": "2026-09-20T10:00:00Z" }
-        ]
-      }
+        "redirect_url": "http://localhost:8080/callback"
+      },
+      "connections": [
+        { "name": "c24", "bank": "C24 Bank", "country": "DE", "session_id": "...", "consent_valid_until": "2026-09-14T15:00:00Z" },
+        { "name": "revolut", "bank": "Revolut", "country": "LT", "session_id": "...", "consent_valid_until": "2026-09-20T10:00:00Z" }
+      ]
     }
   ],
   "mcp": {

@@ -23,11 +23,11 @@ func TestLoad_FileAndDefaults(t *testing.T) {
         "name": "eb", "type": "enable-banking",
         "enable_banking": {
           "app_id": "`+validAppID+`",
-          "redirect_url": "http://localhost:8080/callback",
-          "connections": [
-            {"name":"c24","bank":"C24 Bank","country":"DE","session_id":"s1","consent_valid_until":"2026-09-12T13:36:15Z"}
-          ]
-        }
+          "redirect_url": "http://localhost:8080/callback"
+        },
+        "connections": [
+          {"name":"c24","bank":"C24 Bank","country":"DE","session_id":"s1","consent_valid_until":"2026-09-12T13:36:15Z"}
+        ]
       }],
       "mcp": { "access_mode": "ReadOnly" }
     }`)
@@ -46,17 +46,13 @@ func TestLoad_FileAndDefaults(t *testing.T) {
 	if eb.Environment != EnvSandbox { // default applied
 		t.Errorf("environment default = %q", eb.Environment)
 	}
-	// Connections written under the legacy enable_banking.connections location are
-	// migrated to the provider-agnostic ProviderConfig.Connections on load.
+	// Connections are a provider-agnostic, first-class field on ProviderConfig.
 	conns := cfg.Providers[0].Connections
 	if len(conns) != 1 || conns[0].Country != "DE" {
 		t.Fatalf("connections = %+v", conns)
 	}
 	if conns[0].ConsentValidUntil.Year() != 2026 {
 		t.Errorf("consent time not parsed: %v", conns[0].ConsentValidUntil)
-	}
-	if eb.LegacyConnections != nil {
-		t.Errorf("legacy connections should be cleared after migration: %+v", eb.LegacyConnections)
 	}
 	if cfg.MCP.Transport != TransportStdio || cfg.MCP.CacheTTLMinutes != 5 || cfg.MCP.LogFormat != LogFormatText || cfg.MCP.LogLevel != LogInfo {
 		t.Errorf("mcp defaults = %+v", cfg.MCP)

@@ -40,12 +40,12 @@ spec:
               value: {{ .Values.mcp.logLevel | quote }}
             - name: MCP_CACHE_PATH
               value: "/var/cache/fin-mcp/cache.db"
-            {{- if .Values.mcp.bearerToken }}
+            {{- if or .Values.mcp.bearerToken .Values.mcp.existingSecret }}
             - name: MCP_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fin-mcp.fullname" . }}
-                  key: bearer-token
+                  name: {{ .Values.mcp.existingSecret | default (include "fin-mcp.fullname" .) }}
+                  key: {{ .Values.mcp.bearerTokenKey }}
             {{- end }}
             {{- if .Values.otel.exporterEndpoint }}
             - name: OTEL_SERVICE_NAME

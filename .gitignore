@@ -1,4 +1,6 @@
 # Binaries and build artifacts
+/fin-mcp
+/fin-mcp.exe
 /enable-banking-go
 /enable-banking-mcp
 enable-banking-go.exe

@@ -85,11 +85,6 @@ type EnableBankingConfig struct {
 	PrivateKeyKeyring string      `json:"private_key_keyring,omitempty"` // OS keychain account (local only)
 	Environment       Environment `json:"environment"`
 	RedirectURL       string      `json:"redirect_url"`
-
-	// Deprecated: connections moved to ProviderConfig.Connections. Retained only
-	// so legacy config files still load; migrateLegacyConnections hoists and
-	// clears these on load.
-	LegacyConnections []Connection `json:"connections,omitempty"`
 }
 
 // MockProviderConfig configures the in-memory mock provider (testing/demo).
@@ -172,29 +167,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	cfg.migrateLegacyConnections()
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 	return &cfg, nil
-}
-
-// migrateLegacyConnections hoists connections from the deprecated
-// enable_banking.connections location to the provider-agnostic
-// ProviderConfig.Connections, then clears the legacy field so SaveConfig writes
-// the new schema.
-func (c *Config) migrateLegacyConnections() {
-	for i := range c.Providers {
-		eb := c.Providers[i].EnableBanking
-		if eb == nil || len(eb.LegacyConnections) == 0 {
-			continue
-		}
-		if len(c.Providers[i].Connections) == 0 {
-			c.Providers[i].Connections = eb.LegacyConnections
-		}
-		eb.LegacyConnections = nil
-	}
 }
 
 func envKey(prefix, group string) func(string) string {

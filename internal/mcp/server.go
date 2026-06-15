@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -461,6 +462,12 @@ func (s *MCPServer) handleSubmitTransfer(ctx context.Context, req *mcp.CallToolR
 	return makeSuccessResult(msg)
 }
 
+// authMiddleware guards SSE requests with a static bearer token. Per the MCP
+// authorization spec the token MUST be presented in the Authorization header
+// (never the URL query string, which leaks via proxy logs, the Referer header
+// and browser history) and is compared in constant time to avoid a timing
+// side-channel. The server MUST run behind TLS so the token is not exposed in
+// transit. When token is empty, authentication is disabled.
 func authMiddleware(next http.Handler, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
@@ -468,25 +475,18 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 			return
 		}
 
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				reqToken := strings.TrimPrefix(authHeader, "Bearer ")
-				if reqToken == token {
-					next.ServeHTTP(w, r)
-					return
-				}
+		const prefix = "Bearer "
+		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, prefix) {
+			presented := strings.TrimPrefix(authHeader, prefix)
+			if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) == 1 {
+				next.ServeHTTP(w, r)
+				return
 			}
 		}
 
-		reqToken := r.URL.Query().Get("token")
-		if reqToken == token {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		slog.Warn("unauthorized request blocked inside HTTP middleware")
-		http.Error(w, "Unauthorized: Invalid or missing bearer token", http.StatusUnauthorized)
+		slog.WarnContext(r.Context(), "unauthorized MCP request blocked", "remote_addr", r.RemoteAddr, "path", r.URL.Path)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="fin-mcp", error="invalid_token"`)
+		http.Error(w, "Unauthorized: a valid bearer token is required in the Authorization header", http.StatusUnauthorized)
 	})
 }
 
@@ -659,6 +659,10 @@ func runSSE(ctx context.Context, mcpServer *mcp.Server, cfg *config.Config) erro
 	handler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
 	mux := http.NewServeMux()
 	mux.Handle("/", authMiddleware(handler, cfg.MCP.BearerToken))
+
+	if cfg.MCP.BearerToken == "" {
+		slog.WarnContext(ctx, "SSE transport is running WITHOUT a bearer token — every request is accepted. Set mcp.bearer_token (and run behind TLS) for any non-loopback deployment.")
+	}
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
