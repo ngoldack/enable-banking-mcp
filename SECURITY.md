@@ -12,9 +12,10 @@ acknowledgement within a few days.
 | Asset | Sensitivity | Where it lives |
 |---|---|---|
 | Enable Banking app **private key** (PEM) | Critical | file, inline config, or OS keychain (local); mounted Secret (k8s) |
-| Bank **session IDs / consents** | High | config file (provider `connections[]`) |
-| MCP **bearer token** (SSE) | High | env / k8s Secret (chart-managed or `existingSecret`) |
-| Cached accounts/balances/transactions | Medium | BadgerDB at `cache_path` |
+| Bank **session IDs / consents** | High | config file (provider `connections[]`) — a k8s Secret in production (whole `config.json`) |
+| MCP **bearer token** (SSE) | High | `config.json` (k8s Secret) or env |
+| Cache **encryption key** / valkey password | High | `config.json` (k8s Secret) |
+| Cached accounts/balances/transactions | Medium | process memory, or valkey (AES-256-GCM encrypted at rest) |
 
 Trust boundaries:
 
@@ -67,6 +68,13 @@ Trust boundaries:
 - The private key is never baked into the image. Sources: file path, inline
   content, **OS keychain** (local only, via `zalando/go-keyring`), or a mounted
   Kubernetes Secret.
+- In Kubernetes the **entire `config.json` is a Secret** (never a ConfigMap),
+  because it carries bank session IDs, the bearer token, and any cache secrets.
+  Supply it out-of-band via `config.existingSecret` so it never passes through
+  Helm values or CI.
+- The **valkey cache encrypts values at rest** with AES-256-GCM by default; the
+  key (base64 32-byte) is generated at `config init` and stored as a secret. The
+  `memory` and `none` backends keep nothing in external storage.
 - `config show` redacts secrets. Logs go to **stderr** as structured `slog` and
   do not print key material; stdout carries only the JSON-RPC stream.
 

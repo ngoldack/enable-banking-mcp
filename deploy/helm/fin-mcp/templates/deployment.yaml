@@ -12,7 +12,9 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.config.existingSecret }}
+        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -26,27 +28,10 @@ spec:
           args: ["server", "--config", "/etc/fin-mcp/config.json"]
           ports:
             - name: http
-              containerPort: {{ .Values.mcp.port }}
+              containerPort: {{ .Values.config.mcp.port }}
           env:
-            - name: MCP_TRANSPORT
-              value: "sse"
-            - name: MCP_PORT
-              value: {{ .Values.mcp.port | quote }}
-            - name: MCP_ACCESS_MODE
-              value: {{ .Values.mcp.accessMode | quote }}
-            - name: MCP_LOG_FORMAT
-              value: {{ .Values.mcp.logFormat | quote }}
-            - name: MCP_LOG_LEVEL
-              value: {{ .Values.mcp.logLevel | quote }}
-            - name: MCP_CACHE_PATH
-              value: "/var/cache/fin-mcp/cache.db"
-            {{- if or .Values.mcp.bearerToken .Values.mcp.existingSecret }}
-            - name: MCP_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.mcp.existingSecret | default (include "fin-mcp.fullname" .) }}
-                  key: {{ .Values.mcp.bearerTokenKey }}
-            {{- end }}
+            # All settings come from the mounted config.json (a Secret). Only
+            # telemetry is wired via env here.
             {{- if .Values.otel.exporterEndpoint }}
             - name: OTEL_SERVICE_NAME
               value: {{ .Values.otel.serviceName | quote }}
@@ -57,13 +42,6 @@ spec:
             - name: config
               mountPath: /etc/fin-mcp
               readOnly: true
-            - name: cache
-              mountPath: /var/cache/fin-mcp
-            {{- if .Values.privateKey.content }}
-            - name: keys
-              mountPath: /etc/fin-mcp/keys
-              readOnly: true
-            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -74,19 +52,18 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
+        # The whole config (config.json + optional private.key) comes from a
+        # single Secret — chart-rendered or the operator-supplied existingSecret.
         - name: config
-          configMap:
-            name: {{ include "fin-mcp.fullname" . }}
-        - name: cache
-          emptyDir: {}
-        {{- if .Values.privateKey.content }}
-        - name: keys
           secret:
-            secretName: {{ include "fin-mcp.fullname" . }}
+            secretName: {{ .Values.config.existingSecret | default (include "fin-mcp.fullname" .) }}
             items:
+              - key: config.json
+                path: config.json
+              {{- if and (not .Values.config.existingSecret) .Values.privateKey.content }}
               - key: private.key
-                path: private.key
-        {{- end }}
+                path: keys/private.key
+              {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

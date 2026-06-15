@@ -35,7 +35,7 @@ type MCPServer struct {
 	configPath string
 	config     *config.Config
 	provider   provider.Provider
-	cache      *bank.Cache
+	cache      bank.Cache
 }
 
 func NewMCPServer(configPath string) (*MCPServer, error) {
@@ -54,7 +54,22 @@ func NewMCPServer(configPath string) (*MCPServer, error) {
 	}
 
 	ttl := time.Duration(cfg.MCP.CacheTTLMinutes) * time.Minute
-	bCache := bank.NewCache(cfg.MCP.CachePath, ttl)
+	bCache, err := bank.NewCache(bank.CacheOptions{
+		Type: string(cfg.MCP.CacheType),
+		TTL:  ttl,
+		Valkey: bank.ValkeyOptions{
+			Address:  cfg.MCP.CacheValkeyAddress,
+			Username: cfg.MCP.CacheValkeyUsername,
+			Password: cfg.MCP.CacheValkeyPassword,
+			DB:       cfg.MCP.CacheValkeyDB,
+			TLS:      cfg.MCP.CacheValkeyTLS,
+		},
+		Encrypted:     cfg.MCP.CacheType == config.CacheValkey && cfg.MCP.CacheEncryption == config.CacheEncrypted,
+		EncryptionKey: cfg.MCP.CacheEncryptionKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize cache: %w", err)
+	}
 
 	return &MCPServer{
 		configPath: configPath,
@@ -543,6 +558,7 @@ func RunMCPServer(configPath string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = server.cache.Close() }()
 
 	// 1. Configure and initialize structured logging (log/slog) directed to os.Stderr
 	var level slog.Level

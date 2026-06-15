@@ -24,7 +24,10 @@ func testModel(t *testing.T) *Model {
 			LogLevel:        config.LogInfo,
 		},
 	}
-	cache := bank.NewCache(t.TempDir()+"/cache.db", 5*time.Minute)
+	cache, err := bank.NewCache(bank.CacheOptions{Type: "memory", TTL: 5 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = cache.Close() })
 	return newModel("config.json", cfg, mock.New(), cache)
 }

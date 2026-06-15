@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ngoldack/fin-mcp/internal/bank"
 	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/provider"
 	"github.com/ngoldack/fin-mcp/internal/setup"
@@ -53,6 +54,15 @@ func (c *ConfigInitCmd) Run() error {
 	}
 	cfg := config.NewDefault()
 	cfg.MCP.AccessMode = config.ReadOnly
+
+	// Generate a cache encryption key now so the encrypted valkey backend works
+	// out of the box if the operator later switches cache_type to valkey.
+	key, err := bank.NewEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("generate cache encryption key: %w", err)
+	}
+	cfg.MCP.CacheEncryptionKey = key
+
 	if err := config.SaveConfig(c.Config, cfg); err != nil {
 		return err
 	}

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	badger "github.com/dgraph-io/badger/v4"
 )
 
 type AccountBalance struct {
@@ -48,117 +46,103 @@ type AccountDetail struct {
 	LastFetched  time.Time        `json:"last_fetched"`
 }
 
-type Cache struct {
-	dbPath string
-	db     *badger.DB
-	ttl    time.Duration
+const (
+	keyAccounts   = "accounts:all"
+	keyDetailPfx  = "detail:"
+	defaultCacheT = 5 * time.Minute
+)
+
+// Cache is the provider-agnostic cache port used by the MCP server. Backends:
+// none (disabled), memory (per-process), valkey (shared/external, optionally
+// encrypted).
+type Cache interface {
+	GetAccounts(ctx context.Context) ([]Account, bool)
+	SetAccounts(ctx context.Context, accounts []Account)
+	GetDetail(ctx context.Context, accountID string) (AccountDetail, bool)
+	SetDetail(ctx context.Context, accountID string, detail AccountDetail)
+	Clear(ctx context.Context)
+	Close() error
 }
 
-func NewCache(dbPath string, defaultTTL time.Duration) *Cache {
-	if dbPath == "" {
-		dbPath = ".bank.db"
+// ValkeyOptions configures the external Valkey/Redis backend.
+type ValkeyOptions struct {
+	Address  string
+	Username string
+	Password string
+	DB       int
+	TLS      bool
+}
+
+// CacheOptions selects and configures the cache backend.
+type CacheOptions struct {
+	Type          string // "none" | "memory" | "valkey" (default "memory")
+	TTL           time.Duration
+	Valkey        ValkeyOptions
+	Encrypted     bool   // encrypt values at rest (valkey only)
+	EncryptionKey string // base64-encoded 32-byte AES-256 key (required when Encrypted)
+}
+
+// NewCache builds the configured cache backend, wrapped with OpenTelemetry
+// instrumentation. It returns an error for misconfiguration (e.g. valkey
+// unreachable, or encryption requested without a valid key).
+func NewCache(opts CacheOptions) (Cache, error) {
+	ttl := opts.TTL
+	if ttl <= 0 {
+		ttl = defaultCacheT
 	}
 
-	opts := badger.DefaultOptions(dbPath).WithLogger(nil)
-	db, err := badger.Open(opts)
+	var (
+		backend Cache
+		err     error
+	)
+	switch opts.Type {
+	case "", string(typeMemory):
+		backend = newMemoryCache(ttl)
+	case string(typeNone):
+		backend = noopCache{}
+	case string(typeValkey):
+		backend, err = newValkeyCache(opts, ttl)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unknown cache type %q (valid: none, memory, valkey)", opts.Type)
+	}
+
+	kind := opts.Type
+	if kind == "" {
+		kind = string(typeMemory)
+	}
+	return newInstrumentedCache(backend, kind), nil
+}
+
+// Internal backend-type tags (kept separate from config to keep bank decoupled).
+type backendType string
+
+const (
+	typeNone   backendType = "none"
+	typeMemory backendType = "memory"
+	typeValkey backendType = "valkey"
+)
+
+func detailKey(accountID string) string { return keyDetailPfx + accountID }
+
+func marshal(v any) ([]byte, bool) {
+	b, err := json.Marshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("failed to open badger cache database: %v", err))
+		return nil, false
 	}
-
-	if defaultTTL <= 0 {
-		defaultTTL = 5 * time.Minute
-	}
-
-	return &Cache{
-		dbPath: dbPath,
-		db:     db,
-		ttl:    defaultTTL,
-	}
+	return b, true
 }
 
-func (c *Cache) Close() error {
-	if c.db != nil {
-		return c.db.Close()
-	}
-	return nil
+// noopCache disables caching: every read misses, every write is dropped.
+type noopCache struct{}
+
+func (noopCache) GetAccounts(context.Context) ([]Account, bool) { return nil, false }
+func (noopCache) SetAccounts(context.Context, []Account)        {}
+func (noopCache) GetDetail(context.Context, string) (AccountDetail, bool) {
+	return AccountDetail{}, false
 }
-
-func (c *Cache) SetAccounts(ctx context.Context, accounts []Account) {
-	bytes, err := json.Marshal(accounts)
-	if err != nil {
-		return
-	}
-
-	_ = c.db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry([]byte("accounts:all"), bytes).WithTTL(c.ttl)
-		return txn.SetEntry(e)
-	})
-}
-
-func (c *Cache) GetAccounts(ctx context.Context) ([]Account, bool) {
-	var accounts []Account
-	found := false
-
-	_ = c.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte("accounts:all"))
-		if err != nil {
-			return err // returns ErrKeyNotFound if expired or missing
-		}
-
-		val, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-
-		if err := json.Unmarshal(val, &accounts); err != nil {
-			return err
-		}
-
-		found = true
-		return nil
-	})
-
-	return accounts, found
-}
-
-func (c *Cache) SetDetail(ctx context.Context, accountID string, detail AccountDetail) {
-	bytes, err := json.Marshal(detail)
-	if err != nil {
-		return
-	}
-
-	_ = c.db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry([]byte("detail:"+accountID), bytes).WithTTL(c.ttl)
-		return txn.SetEntry(e)
-	})
-}
-
-func (c *Cache) GetDetail(ctx context.Context, accountID string) (AccountDetail, bool) {
-	var detail AccountDetail
-	found := false
-
-	_ = c.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte("detail:" + accountID))
-		if err != nil {
-			return err
-		}
-
-		val, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-
-		if err := json.Unmarshal(val, &detail); err != nil {
-			return err
-		}
-
-		found = true
-		return nil
-	})
-
-	return detail, found
-}
-
-func (c *Cache) Clear(ctx context.Context) {
-	_ = c.db.DropAll()
-}
+func (noopCache) SetDetail(context.Context, string, AccountDetail) {}
+func (noopCache) Clear(context.Context)                            {}
+func (noopCache) Close() error                                     { return nil }

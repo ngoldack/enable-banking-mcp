@@ -63,7 +63,7 @@ type Model struct {
 	configPath string
 	cfg        *config.Config
 	prov       provider.Provider
-	cache      *bank.Cache
+	cache      bank.Cache
 
 	state      viewState
 	prevState  viewState
@@ -96,7 +96,7 @@ type accountDetailMsg struct {
 
 // Commands.
 
-func fetchAccountsCmd(prov provider.Provider, cache *bank.Cache, refresh bool) tea.Cmd {
+func fetchAccountsCmd(prov provider.Provider, cache bank.Cache, refresh bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -117,7 +117,7 @@ func fetchAccountsCmd(prov provider.Provider, cache *bank.Cache, refresh bool) t
 	}
 }
 
-func fetchAccountDetailCmd(prov provider.Provider, accountID string, cache *bank.Cache, refresh bool) tea.Cmd {
+func fetchAccountDetailCmd(prov provider.Provider, accountID string, cache bank.Cache, refresh bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -164,14 +164,29 @@ func NewModel(configPath string) (*Model, error) {
 	if !ok {
 		return nil, fmt.Errorf("no bank provider configured")
 	}
-	bCache := bank.NewCache(cfg.MCP.CachePath, time.Duration(cfg.MCP.CacheTTLMinutes)*time.Minute)
+	bCache, err := bank.NewCache(bank.CacheOptions{
+		Type: string(cfg.MCP.CacheType),
+		TTL:  time.Duration(cfg.MCP.CacheTTLMinutes) * time.Minute,
+		Valkey: bank.ValkeyOptions{
+			Address:  cfg.MCP.CacheValkeyAddress,
+			Username: cfg.MCP.CacheValkeyUsername,
+			Password: cfg.MCP.CacheValkeyPassword,
+			DB:       cfg.MCP.CacheValkeyDB,
+			TLS:      cfg.MCP.CacheValkeyTLS,
+		},
+		Encrypted:     cfg.MCP.CacheType == config.CacheValkey && cfg.MCP.CacheEncryption == config.CacheEncrypted,
+		EncryptionKey: cfg.MCP.CacheEncryptionKey,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return newModel(configPath, cfg, prov, bCache), nil
 }
 
 // newModel assembles the model from injected dependencies (no I/O), which keeps
 // it unit-testable with a mock provider and a temp cache.
-func newModel(configPath string, cfg *config.Config, prov provider.Provider, cache *bank.Cache) *Model {
+func newModel(configPath string, cfg *config.Config, prov provider.Provider, cache bank.Cache) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accentColor)

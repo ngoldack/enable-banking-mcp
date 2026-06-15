@@ -90,10 +90,41 @@ type-specific credentials block, and a provider-agnostic `connections[]` list.
 | `transport` | `stdio` | `MCP_TRANSPORT` | `stdio` \| `sse`. |
 | `port` | `8090` | `MCP_PORT` | SSE listen port. |
 | `bearer_token` | _(empty)_ | `MCP_BEARER_TOKEN` | SSE auth token; empty disables auth (loopback only). |
-| `cache_ttl_minutes` | `5` | `MCP_CACHE_TTL_MINUTES` | BadgerDB entry TTL. |
-| `cache_path` | `.bank.db` | `MCP_CACHE_PATH` | Cache dir; set writable for a read-only rootfs. |
+| `cache_type` | `memory` | `MCP_CACHE_TYPE` | `none` \| `memory` \| `valkey`. |
+| `cache_ttl_minutes` | `5` | `MCP_CACHE_TTL_MINUTES` | Entry TTL. |
+| `cache_valkey_address` | _(empty)_ | `MCP_CACHE_VALKEY_ADDRESS` | `host:port` (required for valkey). |
+| `cache_valkey_username` | _(empty)_ | `MCP_CACHE_VALKEY_USERNAME` | Valkey ACL user. |
+| `cache_valkey_password` | _(empty)_ | `MCP_CACHE_VALKEY_PASSWORD` | Valkey password (**secret**). |
+| `cache_valkey_db` | `0` | `MCP_CACHE_VALKEY_DB` | Valkey logical DB. |
+| `cache_valkey_tls` | `false` | `MCP_CACHE_VALKEY_TLS` | Use TLS to Valkey. |
+| `cache_encryption` | `encrypted` | `MCP_CACHE_ENCRYPTION` | valkey only: `encrypted` \| `none`. |
+| `cache_encryption_key` | _(generated)_ | `MCP_CACHE_ENCRYPTION_KEY` | base64 32-byte AES-256 key (**secret**). |
 | `log_format` | `text` | `MCP_LOG_FORMAT` | `text` \| `json`. |
 | `log_level` | `info` | `MCP_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error`. |
+
+## Caching
+
+The cache is pluggable and optional. `cache_type` selects the backend:
+
+| Backend | Shared? | Encryption | Notes |
+|---|---|---|---|
+| `none` | — | — | Caching disabled; every read hits the provider. |
+| `memory` | **No** (per-process) | n/a (process RAM) | Default. Fast, no dependency. The TUI and the server keep **independent** caches. |
+| `valkey` | **Yes** | AES-256-GCM (default on) | External Valkey/Redis; shared across processes/replicas. |
+
+For `valkey`, values are encrypted at rest by default. The encryption key is a
+base64-encoded 32-byte AES-256 key:
+
+- `fin-mcp config init` generates one into `cache_encryption_key`.
+- Or generate manually: `openssl rand -base64 32`.
+
+Set `cache_encryption: none` to store plaintext (not recommended). Cache hit/miss
+counts and operation latency are exported as OpenTelemetry metrics
+(`fin_mcp.cache.requests`, `fin_mcp.cache.operation.duration`).
+
+> Sensitive cache fields (`cache_valkey_password`, `cache_encryption_key`) belong
+> in a Secret — in Kubernetes the whole `config.json` is a Secret (see
+> [deployment.md](deployment.md)).
 
 ## Environment overrides
 

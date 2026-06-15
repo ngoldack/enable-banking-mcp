@@ -11,44 +11,66 @@ image:
   pullPolicy: IfNotPresent
 
 # OpenTelemetry (in-process Go SDK — traces + metrics over OTLP/HTTP).
-# Set exporterEndpoint to your collector to enable telemetry. Leave it empty to
-# disable it entirely (the SDK installs nothing and runs at zero overhead). No
-# elevated privileges are required.
+# Set exporterEndpoint to your collector to enable telemetry; leave empty to
+# disable it (zero overhead). No elevated privileges are required.
 otel:
   exporterEndpoint: "" # e.g. http://otel-collector:4318
   serviceName: fin-mcp
 
-mcp:
-  port: 8090
-  accessMode: ReadOnly # ReadOnly | InternalOnly | Unrestricted
-  cacheTTLMinutes: 5
-  logFormat: json # text | json
-  logLevel: info
-  # Bearer token for SSE auth. Three options, in order of preference:
-  #   1. existingSecret: reference a Secret you created out-of-band — the token
-  #      never passes through Helm values, CI logs, or release history. PREFERRED.
-  #   2. bearerToken: inline value (dev only; ends up in the Helm release Secret).
-  #   3. neither: authentication is DISABLED — only safe on loopback. The server
-  #      logs a warning at startup. Always run behind TLS regardless.
-  existingSecret: "" # name of a pre-existing Secret holding the token
-  bearerTokenKey: bearer-token # key within the Secret
-  bearerToken: ""
-
-# Provider topology (rendered into a ConfigMap as config.json). Secrets do NOT
-# belong here — reference the mounted key via private_key_path.
+# The ENTIRE config.json is treated as sensitive (it holds bank session IDs, the
+# bearer token, and any cache secrets) and is rendered into a Kubernetes
+# **Secret**, never a ConfigMap.
+#
+#   - PREFERRED (production): set config.existingSecret to a Secret you created
+#     out-of-band, with a `config.json` key (and the private key inline via
+#     `private_key_content`, or a `private.key` key — see deployment docs). The
+#     config then never passes through Helm values, CI logs, or release history.
+#   - Otherwise the chart renders config.json into its own Secret from the values
+#     below (dev / GitOps-with-sealed-secrets).
 config:
+  existingSecret: "" # Secret with a `config.json` key (and optional `private.key`)
+
+  # Provider topology. Connections are added out-of-band (they require SCA) and
+  # belong in the Secret — keep them empty here and patch the Secret, or use
+  # config.existingSecret.
   providers:
     - name: enable-banking
       type: enable-banking
       enable_banking:
         app_id: ""
+        # Use an inline key (private_key_content) for the existingSecret path, or
+        # mount a file at this path via privateKey.content for the chart path.
         private_key_path: /etc/fin-mcp/keys/private.key
         environment: SANDBOX
-        redirect_url: http://localhost:8080/callback
-        connections: []
+        # redirect_url is only needed for setup (SCA) and payment initiation.
+        # Omit it for a read-only deployment with already-authorized sessions.
+        redirect_url: ""
+      connections: []
 
-# Enable Banking application private key (PEM). Stored in a Secret and mounted at
-# /etc/fin-mcp/keys/private.key. Leave empty to manage the Secret yourself.
+  mcp:
+    accessMode: ReadOnly # ReadOnly | InternalOnly | Unrestricted
+    port: 8090
+    logFormat: json # text | json
+    logLevel: info
+    # Bearer token for SSE auth (sensitive — rendered into the Secret). Empty
+    # disables auth; only safe on loopback. Always run behind TLS.
+    bearerToken: ""
+    cache:
+      type: memory # none | memory | valkey
+      ttlMinutes: 5
+      # valkey-only: at-rest encryption of cached values.
+      encryption: encrypted # encrypted | none
+      encryptionKey: "" # base64-encoded 32-byte AES-256 key (sensitive)
+      valkey:
+        address: "" # host:port
+        username: ""
+        password: "" # sensitive
+        db: 0
+        tls: false
+
+# Enable Banking application private key (PEM). Rendered into the Secret and
+# mounted at /etc/fin-mcp/keys/private.key. Leave empty when using
+# config.existingSecret with an inline private_key_content.
 privateKey:
   content: ""
 

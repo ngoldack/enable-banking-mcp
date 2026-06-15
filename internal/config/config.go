@@ -113,15 +113,44 @@ func (p *ProviderConfig) Connection(name string) *Connection {
 	return nil
 }
 
+// CacheType selects the cache backend.
+type CacheType string
+
+const (
+	CacheNone   CacheType = "none"   // caching disabled
+	CacheMemory CacheType = "memory" // in-process (per-process; not shared across processes)
+	CacheValkey CacheType = "valkey" // external Valkey/Redis (shared)
+)
+
+// CacheEncryptionMode controls at-rest encryption of cached values (valkey only).
+type CacheEncryptionMode string
+
+const (
+	CacheEncrypted   CacheEncryptionMode = "encrypted" // AES-256-GCM (default)
+	CacheUnencrypted CacheEncryptionMode = "none"
+)
+
 type MCPConfig struct {
-	AccessMode      AccessMode    `json:"access_mode"`
-	Transport       TransportType `json:"transport"`
-	Port            int           `json:"port,omitempty"`
-	BearerToken     string        `json:"bearer_token,omitempty"`
-	CacheTTLMinutes int           `json:"cache_ttl_minutes,omitempty"`
-	CachePath       string        `json:"cache_path,omitempty"` // BadgerDB dir (default ".bank.db"); set writable for read-only rootfs
-	LogFormat       LogFormat     `json:"log_format,omitempty"`
-	LogLevel        LogLevel      `json:"log_level,omitempty"`
+	AccessMode  AccessMode    `json:"access_mode"`
+	Transport   TransportType `json:"transport"`
+	Port        int           `json:"port,omitempty"`
+	BearerToken string        `json:"bearer_token,omitempty"`
+
+	// Cache. CacheType selects the backend: memory is per-process; valkey is
+	// shared/external. Sensitive cache fields (valkey password, encryption key)
+	// belong in a Secret, not a ConfigMap.
+	CacheType           CacheType           `json:"cache_type,omitempty"`
+	CacheTTLMinutes     int                 `json:"cache_ttl_minutes,omitempty"`
+	CacheValkeyAddress  string              `json:"cache_valkey_address,omitempty"`
+	CacheValkeyUsername string              `json:"cache_valkey_username,omitempty"`
+	CacheValkeyPassword string              `json:"cache_valkey_password,omitempty"`
+	CacheValkeyDB       int                 `json:"cache_valkey_db,omitempty"`
+	CacheValkeyTLS      bool                `json:"cache_valkey_tls,omitempty"`
+	CacheEncryption     CacheEncryptionMode `json:"cache_encryption,omitempty"`     // valkey only; default encrypted
+	CacheEncryptionKey  string              `json:"cache_encryption_key,omitempty"` // base64-encoded 32-byte AES-256 key
+
+	LogFormat LogFormat `json:"log_format,omitempty"`
+	LogLevel  LogLevel  `json:"log_level,omitempty"`
 }
 
 type Config struct {
@@ -202,8 +231,11 @@ func (c *Config) applyDefaults() {
 	if c.MCP.CacheTTLMinutes == 0 {
 		c.MCP.CacheTTLMinutes = 5
 	}
-	if c.MCP.CachePath == "" {
-		c.MCP.CachePath = ".bank.db"
+	if c.MCP.CacheType == "" {
+		c.MCP.CacheType = CacheMemory
+	}
+	if c.MCP.CacheEncryption == "" {
+		c.MCP.CacheEncryption = CacheEncrypted
 	}
 	if c.MCP.LogFormat == "" {
 		c.MCP.LogFormat = LogFormatText
@@ -264,6 +296,21 @@ func (c *Config) Validate() error {
 	}
 	if c.MCP.CacheTTLMinutes <= 0 {
 		return fmt.Errorf("mcp.cache_ttl_minutes must be > 0")
+	}
+	switch c.MCP.CacheType {
+	case CacheNone, CacheMemory, CacheValkey:
+	default:
+		return fmt.Errorf("invalid mcp.cache_type: %q (valid: none, memory, valkey)", c.MCP.CacheType)
+	}
+	if c.MCP.CacheType == CacheValkey {
+		if c.MCP.CacheValkeyAddress == "" {
+			return fmt.Errorf("mcp.cache_valkey_address is required when cache_type is valkey")
+		}
+		switch c.MCP.CacheEncryption {
+		case CacheEncrypted, CacheUnencrypted:
+		default:
+			return fmt.Errorf("invalid mcp.cache_encryption: %q (valid: encrypted, none)", c.MCP.CacheEncryption)
+		}
 	}
 	switch c.MCP.LogFormat {
 	case LogFormatText, LogFormatJSON:
