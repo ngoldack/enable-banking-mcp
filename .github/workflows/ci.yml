@@ -87,17 +87,8 @@ jobs:
     name: Secure Build & Deliver
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: standard-runtime
-            suffix: standard
-          - target: instrumented-runtime
-            suffix: otel
     env:
-      REGISTRY: ghcr.io
-      IMAGE_BASE: ghcr.io/${{ github.repository }}
+      IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -108,57 +99,78 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@v4.1.0
 
+      # 1. Build ONCE to an OCI layout directory that carries SBOM + SLSA
+      #    provenance attestations. The very same artifact is scanned below and,
+      #    on main, pushed verbatim — no rebuild, no separate scan image.
+      #    `tar=false` is required: Trivy's --input reads an OCI *directory*, and
+      #    skopeo reads it via the oci: transport.
+      - name: Build image (OCI layout, attested)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          outputs: type=oci,dest=./oci-image,tar=false
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 2. Scan the exact built artifact (filesystem + Go binary) on every event.
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          input: ./oci-image
+          format: sarif
+          output: trivy.sarif
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+      # 3. On main only: log in (for Cosign's registry write), push the SAME
+      #    attested OCI artifact with skopeo (--all preserves the image plus its
+      #    SBOM/provenance attestations), then Cosign-sign the index by digest.
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 1. Build a local (loadable) image so Trivy can scan it on EVERY event.
-      #    Attestations are omitted here (an OCI index cannot be loaded locally).
-      - name: Build ${{ matrix.suffix }} image (local, for scanning)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          target: ${{ matrix.target }}
-          load: true
-          tags: fin-mcp-${{ matrix.suffix }}:scan
-          cache-from: type=gha,scope=${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
-
-      - name: Scan ${{ matrix.suffix }} image (Trivy)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: fin-mcp-${{ matrix.suffix }}:scan
-          format: sarif
-          output: trivy-${{ matrix.suffix }}.sarif
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-
-      - name: Upload ${{ matrix.suffix }} Trivy results
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-${{ matrix.suffix }}.sarif
-          category: trivy-${{ matrix.suffix }}
-
-      # 2. On main: build + push WITH SBOM/SLSA attestations, then Cosign-sign by digest.
-      - name: Build & push ${{ matrix.suffix }} image (attestations)
-        id: build-push
+      - name: Push attested image & sign (Cosign)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          target: ${{ matrix.target }}
-          push: true
-          tags: |
-            ${{ env.IMAGE_BASE }}/${{ matrix.suffix }}:latest
-            ${{ env.IMAGE_BASE }}/${{ matrix.suffix }}:${{ github.sha }}
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha,scope=${{ matrix.suffix }}
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null 2>&1 || {
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends skopeo
+          }
 
-      - name: Sign ${{ matrix.suffix }} image & attestations (Cosign)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cosign sign --yes "${{ env.IMAGE_BASE }}/${{ matrix.suffix }}@${{ steps.build-push.outputs.digest }}"
+          # Push the immutable SHA tag and capture the pushed index digest.
+          skopeo copy --all --digestfile=digest.txt \
+            oci:./oci-image \
+            "docker://${IMAGE}:${SHA_TAG}" \
+            --dest-creds "${GHCR_USER}:${GHCR_TOKEN}"
+          DIGEST="$(cat digest.txt)"
+          echo "Pushed ${IMAGE}:${SHA_TAG} @ ${DIGEST}"
+
+          # Move the :latest tag to the same digest (cheap server-side copy).
+          skopeo copy --all \
+            "docker://${IMAGE}:${SHA_TAG}" \
+            "docker://${IMAGE}:latest" \
+            --src-creds "${GHCR_USER}:${GHCR_TOKEN}" \
+            --dest-creds "${GHCR_USER}:${GHCR_TOKEN}"
+
+          # Sign the index digest — covers both tags and all attestations.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+

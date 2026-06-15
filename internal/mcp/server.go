@@ -17,8 +17,18 @@ import (
 	"github.com/ngoldack/fin-mcp/internal/bank"
 	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/provider"
+	"github.com/ngoldack/fin-mcp/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
+
+// serverVersion is reported in the MCP implementation handshake and as the
+// OpenTelemetry service.version resource attribute.
+const serverVersion = "1.0.0"
 
 type MCPServer struct {
 	configPath string
@@ -480,6 +490,54 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 	})
 }
 
+// telemetryMiddleware records an OpenTelemetry span and request metrics for
+// every received MCP method. For tool calls it enriches the span/metrics with
+// the tool name. It is a no-op at runtime unless a telemetry provider is
+// installed (see internal/telemetry).
+func telemetryMiddleware() mcp.Middleware {
+	const scope = "github.com/ngoldack/fin-mcp/internal/mcp"
+	tracer := otel.Tracer(scope)
+	meter := otel.Meter(scope)
+
+	reqCount, _ := meter.Int64Counter(
+		"mcp.server.requests",
+		metric.WithDescription("Count of MCP requests handled by the server"),
+	)
+	reqDuration, _ := meter.Float64Histogram(
+		"mcp.server.request.duration",
+		metric.WithDescription("Duration of MCP requests handled by the server"),
+		metric.WithUnit("s"),
+	)
+
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			spanName := method
+			attrs := []attribute.KeyValue{attribute.String("mcp.method", method)}
+			if p, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok && p != nil {
+				spanName = method + " " + p.Name
+				attrs = append(attrs, attribute.String("mcp.tool", p.Name))
+			}
+
+			ctx, span := tracer.Start(ctx, spanName, trace.WithAttributes(attrs...))
+			start := time.Now()
+
+			res, err := next(ctx, method, req)
+
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				attrs = append(attrs, attribute.Bool("error", true))
+			}
+			span.End()
+
+			measure := metric.WithAttributes(attrs...)
+			reqCount.Add(ctx, 1, measure)
+			reqDuration.Record(ctx, time.Since(start).Seconds(), measure)
+			return res, err
+		}
+	}
+}
+
 func RunMCPServer(configPath string) error {
 	server, err := NewMCPServer(configPath)
 	if err != nil {
@@ -510,8 +568,11 @@ func RunMCPServer(configPath string) error {
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "fin-mcp",
-		Version: "1.0.0",
+		Version: serverVersion,
 	}, nil)
+
+	// Record a span + request metrics for every received MCP method.
+	mcpServer.AddReceivingMiddleware(telemetryMiddleware())
 
 	// Register hyphenated standard tools from bank-mcp
 
@@ -556,6 +617,19 @@ func RunMCPServer(configPath string) error {
 	// Signal-aware context: canceled on SIGINT/SIGTERM for a graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Initialize OpenTelemetry (no-op unless an OTLP endpoint is configured).
+	shutdownTelemetry, err := telemetry.Setup(ctx, serverVersion)
+	if err != nil {
+		return fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(shutdownCtx); err != nil {
+			slog.Warn("telemetry shutdown reported an error", "error", err)
+		}
+	}()
 
 	if server.config.MCP.Transport == config.TransportSSE {
 		return runSSE(ctx, mcpServer, server.config)

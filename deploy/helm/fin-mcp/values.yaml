@@ -5,20 +5,18 @@
 replicaCount: 1
 
 image:
-  # Use the non-otel image by default (smaller attack surface, runs unprivileged).
-  repository: ghcr.io/ngoldack/fin-mcp/standard
+  # Single, unprivileged image. Observability is in-process via the OTel SDK.
+  repository: ghcr.io/ngoldack/fin-mcp
   tag: latest
   pullPolicy: IfNotPresent
 
-# OpenTelemetry eBPF auto-instrumentation.
-# Enabling this switches to the instrumented image, which REQUIRES elevated
-# privileges (privileged container + shared process namespace).
+# OpenTelemetry (in-process Go SDK — traces + metrics over OTLP/HTTP).
+# Set exporterEndpoint to your collector to enable telemetry. Leave it empty to
+# disable it entirely (the SDK installs nothing and runs at zero overhead). No
+# elevated privileges are required.
 otel:
-  enabled: false
-  image: ghcr.io/ngoldack/fin-mcp/otel
-  tag: latest
+  exporterEndpoint: "" # e.g. http://otel-collector:4318
   serviceName: fin-mcp
-  exporterEndpoint: "http://otel-collector:4318"
 
 mcp:
   port: 8090

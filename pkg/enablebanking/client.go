@@ -53,8 +53,23 @@ type Client struct {
 	httpClient        *http.Client
 }
 
-func NewClient(appID, privateKeyPath, privateKeyContent, environment string) APIClient {
-	return &Client{
+// Option customizes a Client at construction time.
+type Option func(*Client)
+
+// WithHTTPClient injects a custom *http.Client — for example one whose Transport
+// is wrapped with OpenTelemetry instrumentation. The SDK itself stays free of
+// any telemetry dependency; callers opt in by supplying their own client. A nil
+// client is ignored (the default is retained).
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Client) {
+		if hc != nil {
+			c.httpClient = hc
+		}
+	}
+}
+
+func NewClient(appID, privateKeyPath, privateKeyContent, environment string, opts ...Option) APIClient {
+	c := &Client{
 		appID:             appID,
 		privateKeyPath:    privateKeyPath,
 		privateKeyContent: privateKeyContent,
@@ -64,6 +79,10 @@ func NewClient(appID, privateKeyPath, privateKeyContent, environment string) API
 			Timeout: 30 * time.Second,
 		},
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // SetBaseURL allows overriding the base URL, which is extremely useful for Mocking and local testing!

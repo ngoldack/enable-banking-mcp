@@ -19,17 +19,9 @@ spec:
       labels:
         {{- include "fin-mcp.selectorLabels" . | nindent 8 }}
     spec:
-      {{- if .Values.otel.enabled }}
-      # eBPF auto-instrumentation requires sharing the host/pod process namespace.
-      shareProcessNamespace: true
-      {{- end }}
       containers:
         - name: fin-mcp
-          {{- if .Values.otel.enabled }}
-          image: "{{ .Values.otel.image }}:{{ .Values.otel.tag }}"
-          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["server", "--config", "/etc/fin-mcp/config.json"]
           ports:
@@ -55,13 +47,11 @@ spec:
                   name: {{ include "fin-mcp.fullname" . }}
                   key: bearer-token
             {{- end }}
-            {{- if .Values.otel.enabled }}
+            {{- if .Values.otel.exporterEndpoint }}
             - name: OTEL_SERVICE_NAME
               value: {{ .Values.otel.serviceName | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otel.exporterEndpoint | quote }}
-            - name: OTEL_GO_AUTO_TARGET_EXE
-              value: "/app/fin-mcp"
             {{- end }}
           volumeMounts:
             - name: config
@@ -74,12 +64,6 @@ spec:
               mountPath: /etc/fin-mcp/keys
               readOnly: true
             {{- end }}
-          {{- if .Values.otel.enabled }}
-          securityContext:
-            # eBPF probes need elevated privileges.
-            privileged: true
-            runAsUser: 0
-          {{- else }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -87,7 +71,6 @@ spec:
             runAsUser: 10001
             capabilities:
               drop: ["ALL"]
-          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:

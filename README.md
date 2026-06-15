@@ -161,13 +161,17 @@ If running the server on a remote cluster or container:
 
 ## 🐳 Container Images & ☸️ Kubernetes
 
-Two image variants are built, scanned (Trivy), attested (SBOM + SLSA provenance)
-and Cosign-signed on every push to `main`:
+A single, unprivileged image is built, scanned (Trivy), attested (SBOM + SLSA
+provenance) and Cosign-signed on every push to `main`:
 
 | Image | Use | Notes |
 |---|---|---|
-| `ghcr.io/ngoldack/fin-mcp/standard` | **Default.** | Runs **non-root**, no privileges. |
-| `ghcr.io/ngoldack/fin-mcp/otel` | OTel eBPF auto-instrumentation | Requires `privileged` + `shareProcessNamespace`. |
+| `ghcr.io/ngoldack/fin-mcp` | **The image.** | Runs **non-root** (uid 10001), no privileges. |
+
+Observability is in-process via the **OpenTelemetry Go SDK** (traces + metrics
+over OTLP/HTTP) — there is no eBPF agent and no privileged container. Telemetry
+is opt-in: set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://otel-collector:4318`)
+to enable it; leave it unset and the SDK installs nothing (zero overhead).
 
 Deploy the SSE server with the Helm chart:
 
@@ -175,14 +179,15 @@ Deploy the SSE server with the Helm chart:
 helm install fin-mcp ./deploy/helm/fin-mcp \
   --set mcp.bearerToken="$(openssl rand -hex 24)" \
   --set privateKey.content="$(cat private.key)" \
+  --set otel.exporterEndpoint="http://otel-collector:4318" \  # optional
   --set-file config.providers=...   # or edit values.yaml
 ```
 
 The chart renders the structured `providers` topology into a ConfigMap, stores
 the bearer token and private key in a Secret, mounts a writable cache
 (`emptyDir`, `MCP_CACHE_PATH`), and applies a hardened `securityContext`
-(read-only rootfs, dropped capabilities) for the standard image. Set
-`otel.enabled=true` to switch to the instrumented image (privileged).
+(non-root, read-only rootfs, dropped capabilities). Setting
+`otel.exporterEndpoint` injects the OTLP env vars to enable telemetry.
 
 See **[SECURITY.md](SECURITY.md)** for the threat model, controls, and image
 verification with Cosign.

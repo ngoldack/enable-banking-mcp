@@ -50,17 +50,21 @@ Trust boundaries:
   do not print key material; stdout carries only the JSON-RPC stream.
 
 **Container / supply chain**
-- The **standard image runs as non-root** (uid 10001), `allowPrivilegeEscalation:
+- The **image runs as non-root** (uid 10001), `allowPrivilegeEscalation:
   false`, `readOnlyRootFilesystem: true`, all capabilities dropped (see the Helm
   chart). The writable cache is an `emptyDir`.
-- Images are scanned with **Trivy** (CRITICAL/HIGH → GitHub Security tab), ship
-  **SBOM + SLSA provenance** attestations, and are **Cosign-signed** (keyless,
-  OIDC) by digest.
+- Observability is **in-process** (OpenTelemetry Go SDK, OTLP/HTTP). There is no
+  eBPF agent and no privileged container; telemetry never widens the runtime
+  attack surface.
+- The single image is scanned with **Trivy** (CRITICAL/HIGH → GitHub Security
+  tab), ships **SBOM + SLSA provenance** attestations, and is **Cosign-signed**
+  (keyless, OIDC) by digest.
 
 ## Residual risks & hardening guidance
 
-- **OTel eBPF image requires `privileged: true` + `shareProcessNamespace`.** Only
-  deploy it where that risk is acceptable; prefer the standard image otherwise.
+- Telemetry is opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`. Point it only at a
+  trusted collector; spans/metrics may carry account identifiers and operational
+  metadata.
 - Use `Environment: PRODUCTION` deliberately — it moves real money.
 - Rotate the bearer token; scope and renew bank consents; keep `access_mode` at
   the least privilege the use case needs.
@@ -73,5 +77,5 @@ Trust boundaries:
 cosign verify \
   --certificate-identity-regexp 'https://github.com/ngoldack/fin-mcp/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/ngoldack/fin-mcp/standard:latest
+  ghcr.io/ngoldack/fin-mcp:latest
 ```

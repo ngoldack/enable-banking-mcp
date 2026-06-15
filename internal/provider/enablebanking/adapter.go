@@ -7,12 +7,14 @@ package enablebanking
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/ngoldack/fin-mcp/internal/bank"
 	"github.com/ngoldack/fin-mcp/internal/config"
 	"github.com/ngoldack/fin-mcp/internal/secret"
 	eb "github.com/ngoldack/fin-mcp/pkg/enablebanking"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Adapter implements provider.Provider on top of the Enable Banking SDK.
@@ -39,7 +41,19 @@ func New(name string, cfg *config.EnableBankingConfig, persist func()) (*Adapter
 		keyContent = v
 	}
 
-	client := eb.NewClient(cfg.AppID, cfg.PrivateKeyPath, keyContent, string(cfg.Environment))
+	// Instrument the outbound Enable Banking HTTP calls with OpenTelemetry. When
+	// no telemetry provider is configured, otelhttp is a near-zero-cost no-op.
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: otelhttp.NewTransport(
+			http.DefaultTransport,
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}),
+		),
+	}
+
+	client := eb.NewClient(cfg.AppID, cfg.PrivateKeyPath, keyContent, string(cfg.Environment), eb.WithHTTPClient(httpClient))
 	return NewWithClient(name, client, cfg, persist), nil
 }
 
